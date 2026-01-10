@@ -1,5 +1,12 @@
 local M = {}
 
+---@class AppContext
+---@field prompt_win integer
+---@field prompt_buf integer
+---@field results_win integer
+---@field results_buf integer
+---@field current_results ListItem[]
+
 local function create_results_buffer()
 	local results_buf = vim.api.nvim_create_buf(false, true)
 	vim.bo[results_buf].buftype = "nofile"
@@ -18,15 +25,17 @@ local function create_propmt_buffer()
 	return prompt_buf
 end
 
+---@param ctx AppContext
+---@param pattern string
 local function update_results(ctx, pattern)
 	vim.bo[ctx.results_buf].modifiable = true
 
-	if pattern == "" then
-		vim.api.nvim_buf_set_lines(ctx.results_buf, 0, -1, false, { "" })
-		return
+	ctx.current_results, highlights = require("tree-from-rg").create_tree_output(pattern)
+	local lines = {}
+	for _, item in ipairs(ctx.current_results) do
+		table.insert(lines, item.line)
 	end
 
-	local lines, highlights = require("tree-from-rg").create_tree_output(pattern)
 	vim.api.nvim_buf_set_lines(ctx.results_buf, 0, -1, false, lines)
 
 	local ns_id = vim.api.nvim_create_namespace("tree_highlights")
@@ -50,7 +59,14 @@ local function close_ui(ctx)
 end
 
 local function show_tree_ui()
-	local ctx = {}
+	---@type AppContext
+	local ctx = {
+		prompt_win = 0,
+		prompt_buf = 0,
+		results_win = 0,
+		results_buf = 0,
+		current_results = {},
+	}
 
 	ctx.prompt_buf = create_propmt_buffer()
 	ctx.results_buf = create_results_buffer()
@@ -97,6 +113,13 @@ local function show_tree_ui()
 
 	vim.keymap.set("n", "<Esc>", function()
 		close_ui(ctx)
+	end, { buffer = ctx.results_buf })
+
+	vim.keymap.set("n", "<CR>", function()
+		local line_num = vim.api.nvim_win_get_cursor(0)[1]
+		local item = ctx.current_results[line_num]
+		close_ui(ctx)
+		vim.cmd.edit(item.path)
 	end, { buffer = ctx.results_buf })
 
 	vim.api.nvim_create_autocmd("WinClosed", {

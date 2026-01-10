@@ -9,6 +9,10 @@ local M = {}
 ---@field name string
 ---@field data TreeNode
 
+---@class ListItem
+---@field line string
+---@field path string
+
 local TREE_CHARS = {
 	vertical = "│   ",
 	branch = "├── ",
@@ -21,7 +25,7 @@ local TREE_CHARS = {
 local function build_tree(files)
 	---@type TreeNode
 	local tree = {
-		_is_file = true,
+		_is_file = false,
 		_path = "",
 	}
 
@@ -72,9 +76,9 @@ end
 
 ---@param node TreeNode
 ---@param prefix string
----@param lines string[]
+---@param items ListItem[]
 ---@param highlights table[]
-local function generate_tree_lines(node, prefix, lines, highlights)
+local function generate_tree_lines(node, prefix, items, highlights)
 	local entries = sort_entries(node)
 
 	for i, entry in ipairs(entries) do
@@ -85,7 +89,7 @@ local function generate_tree_lines(node, prefix, lines, highlights)
 		local connector = is_last_entry and TREE_CHARS.last or TREE_CHARS.branch
 		local line = prefix .. connector .. name
 
-		local line_num = #lines
+		local line_num = #items
 		local name_start = #prefix + #connector
 
 		if #prefix > 0 then
@@ -122,18 +126,21 @@ local function generate_tree_lines(node, prefix, lines, highlights)
 			})
 		end
 
-		table.insert(lines, line)
+		table.insert(items, {
+			line = line,
+			path = data._path,
+		})
 
 		if not data._is_file then
 			local new_prefix = prefix .. (is_last_entry and TREE_CHARS.space or TREE_CHARS.vertical)
-			generate_tree_lines(data, new_prefix, lines, highlights)
+			generate_tree_lines(data, new_prefix, items, highlights)
 		end
 	end
 end
 
 ---@param pattern string
----@return string[]
----@return table[] Highlight information for applying colors
+---@return ListItem[]
+---@return table[]
 function M.create_tree_output(pattern)
 	local escaped_pattern = vim.fn.shellescape(pattern)
 	local cmd = string.format("rg --files | rg -i %s", escaped_pattern)
@@ -150,7 +157,12 @@ function M.create_tree_output(pattern)
 	local tree = build_tree(files)
 
 	local cwd = vim.fn.getcwd()
-	local lines = { cwd }
+	local items = {
+		{
+			line = cwd,
+			path = cwd,
+		},
+	}
 	local highlights = {
 		{
 			line = 0,
@@ -159,9 +171,9 @@ function M.create_tree_output(pattern)
 			hl_group = "TreeDirectory",
 		},
 	}
-	generate_tree_lines(tree, "", lines, highlights)
+	generate_tree_lines(tree, "", items, highlights)
 
-	return lines, highlights
+	return items, highlights
 end
 
 return M
