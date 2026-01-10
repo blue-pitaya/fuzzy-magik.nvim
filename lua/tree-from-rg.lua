@@ -37,6 +37,7 @@ local function build_tree(files)
 						_path = table.concat(vim.list_slice(parts, 1, i), "/"),
 					}
 				end
+				---@diagnostic disable-next-line: cast-local-type
 				current = current[part]
 			end
 		end
@@ -72,7 +73,8 @@ end
 ---@param node TreeNode
 ---@param prefix string
 ---@param lines string[]
-local function generate_tree_lines(node, prefix, lines)
+---@param highlights table[]
+local function generate_tree_lines(node, prefix, lines, highlights)
 	local entries = sort_entries(node)
 
 	for i, entry in ipairs(entries) do
@@ -83,42 +85,83 @@ local function generate_tree_lines(node, prefix, lines)
 		local connector = is_last_entry and TREE_CHARS.last or TREE_CHARS.branch
 		local line = prefix .. connector .. name
 
+		local line_num = #lines
+		local name_start = #prefix + #connector
+
+		if #prefix > 0 then
+			table.insert(highlights, {
+				line = line_num,
+				col_start = 0,
+				col_end = #prefix,
+				hl_group = "TreePrefix",
+			})
+		end
+
+		table.insert(highlights, {
+			line = line_num,
+			col_start = #prefix,
+			col_end = name_start,
+			hl_group = "TreePrefix",
+		})
+
 		if data._is_file then
 			line = line
+			table.insert(highlights, {
+				line = line_num,
+				col_start = name_start,
+				col_end = name_start + #name,
+				hl_group = "TreeFile",
+			})
 		else
 			line = line .. "/"
+			table.insert(highlights, {
+				line = line_num,
+				col_start = name_start,
+				col_end = name_start + #name + 1, -- +1 for the "/"
+				hl_group = "TreeDirectory",
+			})
 		end
 
 		table.insert(lines, line)
 
 		if not data._is_file then
 			local new_prefix = prefix .. (is_last_entry and TREE_CHARS.space or TREE_CHARS.vertical)
-			generate_tree_lines(data, new_prefix, lines)
+			generate_tree_lines(data, new_prefix, lines, highlights)
 		end
 	end
 end
 
 ---@param pattern string
 ---@return string[]
+---@return table[] Highlight information for applying colors
 function M.create_tree_output(pattern)
 	local escaped_pattern = vim.fn.shellescape(pattern)
 	local cmd = string.format("rg --files | rg -i %s", escaped_pattern)
 	local result = vim.system({ "sh", "-c", cmd }, { text = true }):wait()
 	if result.code ~= 0 then
-		return { "No files found matching pattern: " .. pattern }
+		return { "No files found matching pattern: " .. pattern }, {}
 	end
 
 	local files = vim.split(result.stdout or "", "\n", { trimempty = true })
 	if #files == 0 then
-		return { "No files found matching pattern: " .. pattern }
+		return { "No files found matching pattern: " .. pattern }, {}
 	end
 
 	local tree = build_tree(files)
 
-	local lines = { vim.fn.getcwd() }
-	generate_tree_lines(tree, "", lines)
+	local cwd = vim.fn.getcwd()
+	local lines = { cwd }
+	local highlights = {
+		{
+			line = 0,
+			col_start = 0,
+			col_end = #cwd,
+			hl_group = "TreeDirectory",
+		},
+	}
+	generate_tree_lines(tree, "", lines, highlights)
 
-	return lines
+	return lines, highlights
 end
 
 return M

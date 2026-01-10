@@ -4,6 +4,7 @@ local function create_results_buffer()
 	local results_buf = vim.api.nvim_create_buf(false, true)
 	vim.bo[results_buf].buftype = "nofile"
 	vim.bo[results_buf].bufhidden = "wipe"
+	vim.bo[results_buf].modifiable = false
 
 	return results_buf
 end
@@ -18,13 +19,25 @@ local function create_propmt_buffer()
 end
 
 local function update_results(ctx, pattern)
+	vim.bo[ctx.results_buf].modifiable = true
+
 	if pattern == "" then
 		vim.api.nvim_buf_set_lines(ctx.results_buf, 0, -1, false, { "" })
 		return
 	end
 
-	local lines = require("tree-from-rg").create_tree_output(pattern)
+	local lines, highlights = require("tree-from-rg").create_tree_output(pattern)
 	vim.api.nvim_buf_set_lines(ctx.results_buf, 0, -1, false, lines)
+
+	local ns_id = vim.api.nvim_create_namespace("tree_highlights")
+	for _, hl in ipairs(highlights) do
+		vim.api.nvim_buf_set_extmark(ctx.results_buf, ns_id, hl.line, hl.col_start, {
+			end_col = hl.col_end,
+			hl_group = hl.hl_group,
+		})
+	end
+
+	vim.bo[ctx.results_buf].modifiable = false
 end
 
 local function close_ui(ctx)
@@ -64,6 +77,7 @@ local function show_tree_ui()
 		style = "minimal",
 		border = "rounded",
 	})
+	vim.wo[ctx.results_win].cursorline = true
 
 	vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
 		buffer = ctx.prompt_buf,
@@ -132,6 +146,11 @@ end
 
 function M.setup(opts)
 	opts = opts or {}
+
+	vim.api.nvim_set_hl(0, "TreePrefix", { fg = "#6c6c6c", bold = true }) -- Blue for directories
+	vim.api.nvim_set_hl(0, "TreeDirectory", { fg = "#0d73e8", bold = true }) -- Blue for directories
+	vim.api.nvim_set_hl(0, "TreeFile", { link = "Normal" }) -- Normal color for files
+
 	vim.keymap.set("n", "<space>k", show_tree_ui)
 end
 
