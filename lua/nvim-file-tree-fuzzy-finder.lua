@@ -23,12 +23,7 @@ local function update_results(ctx, pattern)
 		return
 	end
 
-	local result = vim.system({ "sh", "-c", 'rg --files | rg "' .. pattern .. '"' }):wait()
-	local lines = vim.split(result.stdout, "\n", { trimempty = true })
-
-	--local ignore = "vendor"
-	--local cmd = { "tree", "-P", pattern, "-I", ignore, "--noreport", "--prune" }
-	--local lines = vim.fn.systemlist(cmd)
+	local lines = require("tree-from-rg").create_tree_output(pattern)
 	vim.api.nvim_buf_set_lines(ctx.results_buf, 0, -1, false, lines)
 end
 
