@@ -6,6 +6,8 @@ local M = {}
 ---@field results_win integer
 ---@field results_buf integer
 ---@field current_results ListItem[]
+---@field has_devicons boolean
+---@field devicons unknown
 
 local function create_results_buffer()
 	local results_buf = vim.api.nvim_create_buf(false, true)
@@ -30,7 +32,7 @@ end
 local function update_results(ctx, pattern)
 	vim.bo[ctx.results_buf].modifiable = true
 
-	ctx.current_results, highlights = require("tree-from-rg").create_tree_output(pattern)
+	ctx.current_results, highlights = require("tree-from-rg").create_tree_output(ctx, pattern)
 	local lines = {}
 	for _, item in ipairs(ctx.current_results) do
 		table.insert(lines, item.line)
@@ -58,16 +60,8 @@ local function close_ui(ctx)
 	end
 end
 
-local function show_tree_ui()
-	---@type AppContext
-	local ctx = {
-		prompt_win = 0,
-		prompt_buf = 0,
-		results_win = 0,
-		results_buf = 0,
-		current_results = {},
-	}
-
+---@param ctx AppContext
+local function show_tree_ui(ctx)
 	ctx.prompt_buf = create_propmt_buffer()
 	ctx.results_buf = create_results_buffer()
 
@@ -174,7 +168,22 @@ function M.setup(opts)
 	vim.api.nvim_set_hl(0, "TreeDirectory", { fg = "#0d73e8", bold = true }) -- Blue for directories
 	vim.api.nvim_set_hl(0, "TreeFile", { link = "Normal" }) -- Normal color for files
 
-	vim.keymap.set("n", "<space>k", show_tree_ui)
+	local has_devicons, devicons = pcall(require, "nvim-web-devicons")
+
+	---@type AppContext
+	local ctx = {
+		prompt_win = 0,
+		prompt_buf = 0,
+		results_win = 0,
+		results_buf = 0,
+		current_results = {},
+		has_devicons = has_devicons,
+		devicons = devicons,
+	}
+
+	vim.keymap.set("n", "<space>k", function()
+		show_tree_ui(ctx)
+	end)
 end
 
 return M
