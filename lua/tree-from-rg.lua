@@ -179,7 +179,12 @@ end
 ---@return ListItem[]
 ---@return table[]
 function M.create_tree_output(ctx, pattern)
-	local escaped_pattern = vim.fn.shellescape(pattern)
+	local chars = {}
+	for char in pattern:gmatch(".") do
+		table.insert(chars, char)
+	end
+	local fuzzy_pattern = table.concat(chars, ".*")
+	local escaped_pattern = vim.fn.shellescape(fuzzy_pattern)
 	local cmd = string.format("rg --files | rg -i %s", escaped_pattern)
 	local result = vim.system({ "sh", "-c", cmd }, { text = true }):wait()
 	if result.code ~= 0 then
