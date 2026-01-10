@@ -5,33 +5,19 @@ local M = {}
 ---@field prompt_buf integer
 ---@field results_win integer
 ---@field results_buf integer
+---@field preview_win integer
+---@field preview_buf integer
 ---@field current_results ListItem[]
 ---@field has_devicons boolean
 ---@field devicons unknown
-
-local function create_results_buffer()
-	local results_buf = vim.api.nvim_create_buf(false, true)
-	vim.bo[results_buf].buftype = "nofile"
-	vim.bo[results_buf].bufhidden = "wipe"
-	vim.bo[results_buf].modifiable = false
-
-	return results_buf
-end
-
-local function create_propmt_buffer()
-	local prompt_buf = vim.api.nvim_create_buf(false, true)
-	vim.bo[prompt_buf].buftype = "prompt"
-	vim.bo[prompt_buf].bufhidden = "wipe"
-	vim.fn.prompt_setprompt(prompt_buf, "> ")
-
-	return prompt_buf
-end
+---@field last_line integer
 
 ---@param ctx AppContext
 ---@param pattern string
 local function update_results(ctx, pattern)
 	vim.bo[ctx.results_buf].modifiable = true
 
+	local highlights = {}
 	ctx.current_results, highlights = require("tree-from-rg").create_tree_output(ctx, pattern)
 	local lines = {}
 	for _, item in ipairs(ctx.current_results) do
@@ -51,6 +37,7 @@ local function update_results(ctx, pattern)
 	vim.bo[ctx.results_buf].modifiable = false
 end
 
+---@param ctx AppContext
 local function close_ui(ctx)
 	if vim.api.nvim_win_is_valid(ctx.prompt_win) then
 		vim.api.nvim_win_close(ctx.prompt_win, true)
@@ -58,36 +45,109 @@ local function close_ui(ctx)
 	if vim.api.nvim_win_is_valid(ctx.results_win) then
 		vim.api.nvim_win_close(ctx.results_win, true)
 	end
+	if vim.api.nvim_win_is_valid(ctx.preview_win) then
+		vim.api.nvim_win_close(ctx.preview_win, true)
+	end
+end
+
+---@param ctx AppContext
+---@param item ListItem
+local function update_preview(ctx, item)
+	vim.bo[ctx.preview_buf].modifiable = true
+
+	local filepath = item.path
+
+	if vim.fn.filereadable(filepath) == 0 then
+		vim.api.nvim_buf_set_lines(ctx.preview_buf, 0, -1, false, { "File not found: " .. filepath })
+		vim.bo[ctx.preview_buf].modifiable = false
+		return
+	end
+
+	-- Read file with error handling
+	local ok, lines = pcall(vim.fn.readfile, filepath)
+	if not ok then
+		vim.api.nvim_buf_set_lines(ctx.preview_buf, 0, -1, false, { "Error reading file" })
+		vim.bo[ctx.preview_buf].modifiable = false
+		return
+	end
+
+	-- Limit lines for performance
+	if #lines > 500 then
+		lines = vim.list_slice(lines, 1, 500)
+		table.insert(lines, "")
+		table.insert(lines, "... (truncated)")
+	end
+
+	vim.api.nvim_buf_set_lines(ctx.preview_buf, 0, -1, false, lines)
+
+	-- Set filetype for syntax highlighting
+	local ft = vim.filetype.match({ filename = filepath })
+	if ft then
+		vim.bo[ctx.preview_buf].filetype = ft
+	end
+
+	-- Update window title with filename
+	vim.api.nvim_win_set_config(ctx.preview_win, {
+		title = " " .. vim.fn.fnamemodify(filepath, ":t") .. " ",
+		title_pos = "center",
+	})
+
+	vim.bo[ctx.preview_buf].modifiable = false
 end
 
 ---@param ctx AppContext
 local function show_tree_ui(ctx)
-	ctx.prompt_buf = create_propmt_buffer()
-	ctx.results_buf = create_results_buffer()
+	local width = math.floor(vim.o.columns * 0.9)
+	local start_col = math.floor((vim.o.columns - width) / 2)
 
-	local w = math.floor(vim.o.columns * 0.9)
-	local col = math.floor((vim.o.columns - w) / 2)
+	local height = vim.o.lines - 9
+	local results_width = math.floor(width * 0.4)
+	local preview_width = width - results_width - 1
+	local start_row = 4
 
+	ctx.prompt_buf = vim.api.nvim_create_buf(false, true)
+	vim.bo[ctx.prompt_buf].buftype = "prompt"
+	vim.bo[ctx.prompt_buf].bufhidden = "wipe"
+	vim.fn.prompt_setprompt(ctx.prompt_buf, "> ")
 	ctx.prompt_win = vim.api.nvim_open_win(ctx.prompt_buf, true, {
 		relative = "editor",
-		width = w,
+		width = width,
 		height = 1,
 		row = 1,
-		col = col,
+		col = start_col,
 		style = "minimal",
 		border = "rounded",
 	})
 
+	ctx.results_buf = vim.api.nvim_create_buf(false, true)
+	vim.bo[ctx.results_buf].buftype = "nofile"
+	vim.bo[ctx.results_buf].bufhidden = "wipe"
+	vim.bo[ctx.results_buf].modifiable = false
 	ctx.results_win = vim.api.nvim_open_win(ctx.results_buf, false, {
 		relative = "editor",
-		width = w,
-		height = vim.o.lines - 9,
-		row = 4,
-		col = col,
+		width = results_width - 1,
+		height = height,
+		row = start_row,
+		col = start_col,
 		style = "minimal",
 		border = "rounded",
 	})
 	vim.wo[ctx.results_win].cursorline = true
+
+	ctx.preview_buf = vim.api.nvim_create_buf(false, true)
+	vim.bo[ctx.preview_buf].buftype = "nofile"
+	vim.bo[ctx.preview_buf].modifiable = false
+	ctx.preview_win = vim.api.nvim_open_win(ctx.preview_buf, false, {
+		relative = "editor",
+		width = preview_width,
+		height = height,
+		col = start_col + results_width + 1,
+		row = start_row,
+		border = "rounded",
+		title = " Preview ",
+		title_pos = "center",
+	})
+	vim.wo[ctx.preview_win].number = false
 
 	vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
 		buffer = ctx.prompt_buf,
@@ -108,6 +168,17 @@ local function show_tree_ui(ctx)
 	vim.keymap.set("n", "<Esc>", function()
 		close_ui(ctx)
 	end, { buffer = ctx.results_buf })
+
+	vim.api.nvim_create_autocmd("CursorMoved", {
+		buffer = ctx.results_buf,
+		callback = function()
+			local line_num = vim.api.nvim_win_get_cursor(0)[1]
+			local item = ctx.current_results[line_num]
+			if line_num ~= ctx.last_line then
+				update_preview(ctx, item)
+			end
+		end,
+	})
 
 	vim.keymap.set("n", "<CR>", function()
 		local line_num = vim.api.nvim_win_get_cursor(0)[1]
@@ -130,6 +201,13 @@ local function show_tree_ui(ctx)
 		end,
 		once = true,
 	})
+	vim.api.nvim_create_autocmd("WinClosed", {
+		pattern = tostring(ctx.preview_buf),
+		callback = function()
+			close_ui(ctx)
+		end,
+		once = true,
+	})
 
 	vim.api.nvim_create_autocmd("WinLeave", {
 		buffer = ctx.prompt_buf,
@@ -138,6 +216,7 @@ local function show_tree_ui(ctx)
 				if
 					vim.api.nvim_get_current_win() ~= ctx.prompt_win
 					and vim.api.nvim_get_current_win() ~= ctx.results_win
+					and vim.api.nvim_get_current_win() ~= ctx.preview_win
 				then
 					close_ui(ctx)
 				end
@@ -151,6 +230,21 @@ local function show_tree_ui(ctx)
 				if
 					vim.api.nvim_get_current_win() ~= ctx.prompt_win
 					and vim.api.nvim_get_current_win() ~= ctx.results_win
+					and vim.api.nvim_get_current_win() ~= ctx.preview_win
+				then
+					close_ui(ctx)
+				end
+			end)
+		end,
+	})
+	vim.api.nvim_create_autocmd("WinLeave", {
+		buffer = ctx.preview_buf,
+		callback = function()
+			vim.schedule(function()
+				if
+					vim.api.nvim_get_current_win() ~= ctx.prompt_win
+					and vim.api.nvim_get_current_win() ~= ctx.results_win
+					and vim.api.nvim_get_current_win() ~= ctx.preview_win
 				then
 					close_ui(ctx)
 				end
@@ -176,9 +270,12 @@ function M.setup(opts)
 		prompt_buf = 0,
 		results_win = 0,
 		results_buf = 0,
+		preview_win = 0,
+		preview_buf = 0,
 		current_results = {},
 		has_devicons = has_devicons,
 		devicons = devicons,
+		last_line = -1,
 	}
 
 	vim.keymap.set("n", "<space>k", function()
