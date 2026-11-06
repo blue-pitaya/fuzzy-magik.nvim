@@ -153,47 +153,85 @@ end
 
 ---@param ctx AppContext
 ---@param item ListItem
-local function update_preview(ctx, item)
-	vim.bo[ctx.preview_buf].modifiable = true
+---@param lines string[]
+---@return boolean
+local function set_preview_lines(ctx, item, lines)
+	if ctx.current_results[ctx.last_line] ~= item or not vim.api.nvim_win_is_valid(ctx.preview_win) then
+		return false
+	end
 
+	vim.treesitter.stop(ctx.preview_buf)
+	vim.bo[ctx.preview_buf].modifiable = true
+	vim.api.nvim_buf_set_lines(ctx.preview_buf, 0, -1, false, lines)
+	vim.bo[ctx.preview_buf].modifiable = false
+	return true
+end
+
+---@param ctx AppContext
+---@param item ListItem
+local function update_preview(ctx, item)
 	local filepath = item.path
 
 	if vim.fn.filereadable(filepath) == 0 then
-		vim.api.nvim_buf_set_lines(ctx.preview_buf, 0, -1, false, { "File not found: " .. filepath })
-		vim.bo[ctx.preview_buf].modifiable = false
+		set_preview_lines(ctx, item, { "File not found: " .. filepath })
 		return
 	end
 
-	-- Read file with error handling
-	local ok, lines = pcall(vim.fn.readfile, filepath)
-	if not ok then
-		vim.api.nvim_buf_set_lines(ctx.preview_buf, 0, -1, false, { "Error reading file" })
-		vim.bo[ctx.preview_buf].modifiable = false
-		return
+	local function show_read_error()
+		vim.schedule(function()
+			set_preview_lines(ctx, item, { "Error reading file" })
+		end)
 	end
 
-	-- Limit lines for performance
-	if #lines > 500 then
-		lines = vim.list_slice(lines, 1, 500)
-		table.insert(lines, "")
-		table.insert(lines, "... (truncated)")
-	end
+	vim.uv.fs_open(filepath, "r", 438, function(open_err, fd)
+		if open_err or not fd then
+			show_read_error()
+			return
+		end
+		vim.uv.fs_fstat(fd, function(stat_err, stat)
+			if stat_err or not stat then
+				vim.uv.fs_close(fd)
+				show_read_error()
+				return
+			end
+			vim.uv.fs_read(fd, stat.size, 0, function(read_err, data)
+				vim.uv.fs_close(fd)
+				if read_err or not data then
+					show_read_error()
+					return
+				end
+				vim.schedule(function()
+					local lines = vim.split(data, "\n")
+					if lines[#lines] == "" then
+						table.remove(lines)
+					end
 
-	vim.api.nvim_buf_set_lines(ctx.preview_buf, 0, -1, false, lines)
+					-- Limit lines for performance
+					if #lines > 500 then
+						lines = vim.list_slice(lines, 1, 500)
+						table.insert(lines, "")
+						table.insert(lines, "... (truncated)")
+					end
 
-	-- Set filetype for syntax highlighting
-	local ft = vim.filetype.match({ filename = filepath })
-	if ft then
-		vim.bo[ctx.preview_buf].filetype = ft
-	end
+					if not set_preview_lines(ctx, item, lines) then
+						return
+					end
 
-	-- Update window title with filename
-	vim.api.nvim_win_set_config(ctx.preview_win, {
-		title = " " .. vim.fn.fnamemodify(filepath, ":t") .. " ",
-		title_pos = "center",
-	})
+					local ft = vim.filetype.match({ filename = filepath })
+					local lang = ft and vim.treesitter.language.get_lang(ft)
+					if lang then
+						pcall(vim.treesitter.start, ctx.preview_buf, lang)
+					end
 
-	vim.bo[ctx.preview_buf].modifiable = false
+					-- Update window title with filename
+					vim.api.nvim_win_set_config(ctx.preview_win, {
+						title = " " .. vim.fn.fnamemodify(filepath, ":t") .. " ",
+						title_pos = "center",
+					})
+				end)
+			end)
+		end)
+	end)
 end
 
 ---@param ctx AppContext
