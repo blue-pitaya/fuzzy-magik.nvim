@@ -1,120 +1,97 @@
 local M = {}
 
----@class AppContext
----@field prompt_win integer
----@field prompt_buf integer
----@field results_win integer
----@field results_buf integer
----@field preview_win integer
----@field preview_buf integer
----@field current_results ListItem[]
----@field last_line integer
----@field mode Mode|nil
----@field origin_buf integer
----@field prompt_text string
-
----@class Mode
----@field list_output fun(pattern: string, ctx: AppContext): ListItem[], table[]
----@field initial_mode "insert"|"normal"
-
----@class TreeNode
----@field _is_file boolean
----@field _path string
----@field [string] TreeNode
-
----@class TreeEntry
----@field name string
----@field data TreeNode
-
----@class ListItem
----@field line string
----@field path string
----@field lnum integer|nil
----@field col integer|nil
----@field text string|nil
----@field bufnr integer|nil
-
 local WINHIGHLIGHT = {
 	default = "Normal:FuzzyMagikNormal,NormalFloat:FuzzyMagikNormal,FloatBorder:FuzzyMagikBorder",
 	active = "Normal:FuzzyMagikNormal,NormalFloat:FuzzyMagikNormal,FloatBorder:FuzzyMagikBorderActive",
 }
 
----@param pattern string
----@return ListItem[]
----@return table[]
-local function create_list_output(pattern)
-	local chars = {}
-	for char in pattern:gmatch(".") do
-		table.insert(chars, char)
-	end
-	local fuzzy_pattern = table.concat(chars, ".*")
-	local escaped_pattern = vim.fn.shellescape(fuzzy_pattern)
-	local cmd = string.format("rg --files | rg -i %s", escaped_pattern)
-	local result = vim.system({ "sh", "-c", cmd }, { text = true }):wait()
-	if result.code ~= 0 then
-		return { { line = "No files found matching pattern: " .. pattern, path = "" } }, {}
-	end
+local HIGHLIGHTS = {
+	FuzzyMagikNormal = { link = "Normal" },
+	FuzzyMagikBorder = { fg = "#6c6c6c" },
+	FuzzyMagikBorderActive = { fg = "#00ffd7" },
+	FuzzyMagikMatch = { fg = "#0d73e8", bold = true },
+	FuzzyMagikExtension = { fg = "#5fd700" },
+	FuzzyMagikPath = { fg = "#af87d7" },
+	FuzzyMagikLineNr = { fg = "#6c6c6c" },
+	FuzzyMagikKind = { fg = "#d7af5f" },
+	FuzzyMagikGitStaged = { fg = "#5fd700" },
+	FuzzyMagikGitUnstaged = { fg = "#d75f5f" },
+	FuzzyMagikGitUntracked = { fg = "#6c6c6c" },
+}
 
-	local files = vim.split(result.stdout or "", "\n", { trimempty = true })
-	if #files == 0 then
-		return { { line = "No files found matching pattern: " .. pattern, path = "" } }, {}
-	end
-	table.sort(files)
+local PROMPT = "> "
+local WIDTH_RATIO = 0.9
+local RESULTS_WIDTH_RATIO = 0.4
+local HEIGHT_MARGIN = 9
+local START_ROW = 4
+local PREVIEW_MIN_LINES = 500
+local PREVIEW_LINES_AFTER_MATCH = 100
+local LSP_TIMEOUT_MS = 1000
+local NAMESPACE = vim.api.nvim_create_namespace("tree_highlights")
 
-	local lower_pattern = pattern:lower()
-	local items = {}
-	local highlights = {}
-	for i, filepath in ipairs(files) do
-		local name_col = filepath:match("()[^/]*$")
-		if name_col > 1 then
-			table.insert(highlights, {
-				line = i - 1,
-				col_start = 0,
-				col_end = name_col - 1,
-				hl_group = "FuzzyMagikPath",
-			})
-		end
+local prompt = {
+	win = 0,
+	buf = 0,
+	text = "",
+}
+local results = {
+	win = 0,
+	buf = 0,
+	items = {},
+	last_line = -1,
+}
+local preview = {
+	win = 0,
+	buf = 0,
+}
+local state = {
+	origin_buf = 0,
+	list_output = nil,
+	start_insert = nil,
+	files = nil,
+}
+local highlights = {}
 
-		local ext_col = filepath:match("[^/]()%.[^./]+$")
-		if ext_col then
-			table.insert(highlights, {
-				line = i - 1,
-				col_start = ext_col - 1,
-				col_end = #filepath,
-				hl_group = "FuzzyMagikExtension",
-			})
-		end
-
-		local lower_path = filepath:lower()
-		local search_from = 1
-		for char in lower_pattern:gmatch(".") do
-			local col = lower_path:find(char, search_from, true)
-			if not col then
-				break
-			end
-			table.insert(highlights, {
-				line = i - 1,
-				col_start = col - 1,
-				col_end = col,
-				hl_group = "FuzzyMagikMatch",
-			})
-			search_from = col + 1
-		end
-
-		table.insert(items, {
-			line = filepath,
-			path = filepath,
-		})
-	end
-
-	return items, highlights
+---@param text string
+local function message(text)
+	return { { line = text, path = "" } }
 end
 
----@param highlights table[]
+---@param text string
+---@param pattern string
+local function fuzzy_match_cols(text, pattern)
+	local cols = {}
+	local search_from = 1
+	local lower_text = text:lower()
+	for char in pattern:lower():gmatch(".") do
+		local col = lower_text:find(char, search_from, true)
+		if not col then
+			return nil
+		end
+		table.insert(cols, col)
+		search_from = col + 1
+	end
+	return cols
+end
+
+---@param line integer
+---@param offset integer
+---@param cols integer[]
+local function add_match_highlights(line, offset, cols)
+	for _, col in ipairs(cols) do
+		table.insert(highlights, {
+			line = line,
+			col_start = offset + col - 1,
+			col_end = offset + col,
+			hl_group = "FuzzyMagikMatch",
+		})
+	end
+end
+
 ---@param line integer
 ---@param offset integer
 ---@param filepath string
-local function add_path_highlights(highlights, line, offset, filepath)
+local function add_path_highlights(line, offset, filepath)
 	local name_col = filepath:match("()[^/]*$")
 	if name_col > 1 then
 		table.insert(highlights, {
@@ -137,11 +114,34 @@ local function add_path_highlights(highlights, line, offset, filepath)
 end
 
 ---@param pattern string
----@return ListItem[]
----@return table[]
+local function create_find_files_output(pattern)
+	if not state.files then
+		local result = vim.system({ "rg", "--files" }, { text = true }):wait()
+		state.files = vim.split(result.stdout or "", "\n", { trimempty = true })
+		table.sort(state.files)
+	end
+
+	local items = {}
+	for _, filepath in ipairs(state.files) do
+		local cols = fuzzy_match_cols(filepath, pattern)
+		if cols then
+			local line = #items
+			add_path_highlights(line, 0, filepath)
+			add_match_highlights(line, 0, cols)
+			table.insert(items, { line = filepath, path = filepath })
+		end
+	end
+
+	if #items == 0 then
+		return message("No files found matching pattern: " .. pattern)
+	end
+	return items
+end
+
+---@param pattern string
 local function create_grep_output(pattern)
 	if pattern == "" then
-		return { { line = "", path = "" } }, {}
+		return message("")
 	end
 
 	local cmd = {
@@ -158,17 +158,16 @@ local function create_grep_output(pattern)
 	}
 	local result = vim.system(cmd, { text = true }):wait()
 	if result.code ~= 0 then
-		return { { line = "No matches for pattern: " .. pattern, path = "" } }, {}
+		return message("No matches for pattern: " .. pattern)
 	end
 
 	local items = {}
-	local highlights = {}
 	for _, output_line in ipairs(vim.split(result.stdout or "", "\n", { trimempty = true })) do
 		local filepath, lnum, col, text = output_line:match("^(.-):(%d+):(%d+):(.*)$")
 		if filepath then
 			local line = #items
 			local location = ":" .. lnum .. ":" .. col .. ":"
-			add_path_highlights(highlights, line, 0, filepath)
+			add_path_highlights(line, 0, filepath)
 			table.insert(highlights, {
 				line = line,
 				col_start = #filepath,
@@ -186,44 +185,21 @@ local function create_grep_output(pattern)
 	end
 
 	if #items == 0 then
-		return { { line = "No matches for pattern: " .. pattern, path = "" } }, {}
+		return message("No matches for pattern: " .. pattern)
 	end
-	return items, highlights
+	return items
 end
 
 ---@param pattern string
----@return ListItem[]
----@return table[]
 local function create_buffers_output(pattern)
-	local lower_pattern = pattern:lower()
 	local items = {}
-	local highlights = {}
 	for _, info in ipairs(vim.fn.getbufinfo({ buflisted = 1 })) do
 		local name = info.name ~= "" and vim.fn.fnamemodify(info.name, ":.") or "[No Name]"
-		local lower_name = name:lower()
-		local match_cols = {}
-		local search_from = 1
-		for char in lower_pattern:gmatch(".") do
-			local col = lower_name:find(char, search_from, true)
-			if not col then
-				match_cols = nil
-				break
-			end
-			table.insert(match_cols, col)
-			search_from = col + 1
-		end
-
-		if match_cols then
+		local cols = fuzzy_match_cols(name, pattern)
+		if cols then
 			local line = #items
-			add_path_highlights(highlights, line, 0, name)
-			for _, col in ipairs(match_cols) do
-				table.insert(highlights, {
-					line = line,
-					col_start = col - 1,
-					col_end = col,
-					hl_group = "FuzzyMagikMatch",
-				})
-			end
+			add_path_highlights(line, 0, name)
+			add_match_highlights(line, 0, cols)
 			table.insert(items, {
 				line = name,
 				path = info.name ~= "" and name or "",
@@ -233,24 +209,21 @@ local function create_buffers_output(pattern)
 	end
 
 	if #items == 0 then
-		return { { line = "No buffers matching pattern: " .. pattern, path = "" } }, {}
+		return message("No buffers matching pattern: " .. pattern)
 	end
-	return items, highlights
+	return items
 end
 
 ---@param pattern string
----@param ctx AppContext
----@return ListItem[]
----@return table[]
-local function create_workspace_symbols_output(pattern, ctx)
-	local responses = vim.lsp.buf_request_sync(ctx.origin_buf, "workspace/symbol", { query = pattern }, 1000)
+---@param origin_buf integer
+local function create_workspace_symbols_output(pattern, origin_buf)
+	local responses = vim.lsp.buf_request_sync(origin_buf, "workspace/symbol", { query = pattern }, LSP_TIMEOUT_MS)
 	local items = {}
-	local highlights = {}
 	for client_id, response in pairs(responses or {}) do
 		local client = vim.lsp.get_client_by_id(client_id)
 		if client and response.result then
 			local ok, symbols =
-				pcall(vim.lsp.util.symbols_to_items, response.result, ctx.origin_buf, client.offset_encoding)
+				pcall(vim.lsp.util.symbols_to_items, response.result, origin_buf, client.offset_encoding)
 			if ok then
 				for _, symbol in ipairs(symbols) do
 					local line = #items
@@ -263,7 +236,7 @@ local function create_workspace_symbols_output(pattern, ctx)
 						col_end = symbol.text:find("]", 1, true) or 0,
 						hl_group = "FuzzyMagikKind",
 					})
-					add_path_highlights(highlights, line, #prefix, filepath)
+					add_path_highlights(line, #prefix, filepath)
 					table.insert(highlights, {
 						line = line,
 						col_start = #prefix + #filepath,
@@ -283,31 +256,27 @@ local function create_workspace_symbols_output(pattern, ctx)
 	end
 
 	if #items == 0 then
-		return { { line = "No symbols matching pattern: " .. pattern, path = "" } }, {}
+		return message("No symbols matching pattern: " .. pattern)
 	end
-	return items, highlights
+	return items
 end
 
 ---@param pattern string
----@return ListItem[]
----@return table[]
 local function create_git_status_output(pattern)
 	local root = vim.system({ "git", "rev-parse", "--show-toplevel" }, { text = true }):wait()
 	if root.code ~= 0 then
-		return { { line = "Not a git repository", path = "" } }, {}
+		return message("Not a git repository")
 	end
 	local root_dir = vim.trim(root.stdout or "")
 
 	local result = vim.system({ "git", "status", "--porcelain=v1", "-z", "--untracked-files=all" }, { text = true })
 		:wait()
 	if result.code ~= 0 then
-		return { { line = "git status failed", path = "" } }, {}
+		return message("git status failed")
 	end
 
 	local entries = vim.split(result.stdout or "", "\0", { plain = true, trimempty = true })
-	local lower_pattern = pattern:lower()
 	local items = {}
-	local highlights = {}
 	local i = 1
 	while i <= #entries do
 		local entry = entries[i]
@@ -318,20 +287,8 @@ local function create_git_status_output(pattern)
 		end
 		i = i + 1
 
-		local lower_path = filepath:lower()
-		local match_cols = {}
-		local search_from = 1
-		for char in lower_pattern:gmatch(".") do
-			local col = lower_path:find(char, search_from, true)
-			if not col then
-				match_cols = nil
-				break
-			end
-			table.insert(match_cols, col)
-			search_from = col + 1
-		end
-
-		if match_cols then
+		local cols = fuzzy_match_cols(filepath, pattern)
+		if cols then
 			local line = #items
 			local prefix = status .. " "
 			if status == "??" then
@@ -359,15 +316,8 @@ local function create_git_status_output(pattern)
 					})
 				end
 			end
-			add_path_highlights(highlights, line, #prefix, filepath)
-			for _, col in ipairs(match_cols) do
-				table.insert(highlights, {
-					line = line,
-					col_start = #prefix + col - 1,
-					col_end = #prefix + col,
-					hl_group = "FuzzyMagikMatch",
-				})
-			end
+			add_path_highlights(line, #prefix, filepath)
+			add_match_highlights(line, #prefix, cols)
 			table.insert(items, {
 				line = prefix .. filepath,
 				path = filepath,
@@ -376,149 +326,129 @@ local function create_git_status_output(pattern)
 	end
 
 	if #items == 0 then
-		return { { line = "No changed files matching pattern: " .. pattern, path = "" } }, {}
+		return message("No changed files matching pattern: " .. pattern)
 	end
-	return items, highlights
+	return items
 end
 
----@type table<string, Mode>
-local MODES = {
-	files = { list_output = create_list_output, initial_mode = "insert" },
-	grep = { list_output = create_grep_output, initial_mode = "insert" },
-	buffers = { list_output = create_buffers_output, initial_mode = "normal" },
-	workspace_symbols = { list_output = create_workspace_symbols_output, initial_mode = "insert" },
-	git_status = { list_output = create_git_status_output, initial_mode = "normal" },
-}
-
----@param ctx AppContext
+---@param list_output fun(pattern: string, origin_buf: integer): table[]
 ---@param pattern string
-local function update_results(ctx, pattern)
-	vim.bo[ctx.results_buf].modifiable = true
+---@param origin_buf integer
+local function update_results(list_output, pattern, origin_buf)
+	vim.bo[results.buf].modifiable = true
 
-	local highlights = {}
-	ctx.current_results, highlights = ctx.mode.list_output(pattern, ctx)
+	highlights = {}
+	results.items = list_output(pattern, origin_buf)
 	local lines = {}
-	for _, item in ipairs(ctx.current_results) do
+	for _, item in ipairs(results.items) do
 		table.insert(lines, item.line)
 	end
 
-	vim.api.nvim_buf_set_lines(ctx.results_buf, 0, -1, false, lines)
+	vim.api.nvim_buf_set_lines(results.buf, 0, -1, false, lines)
 
-	local ns_id = vim.api.nvim_create_namespace("tree_highlights")
+	vim.api.nvim_buf_clear_namespace(results.buf, NAMESPACE, 0, -1)
 	for _, hl in ipairs(highlights) do
-		vim.api.nvim_buf_set_extmark(ctx.results_buf, ns_id, hl.line, hl.col_start, {
+		vim.api.nvim_buf_set_extmark(results.buf, NAMESPACE, hl.line, hl.col_start, {
 			end_col = hl.col_end,
 			hl_group = hl.hl_group,
 		})
 	end
 
-	vim.bo[ctx.results_buf].modifiable = false
+	vim.bo[results.buf].modifiable = false
 end
 
----@param ctx AppContext
-local function close_ui(ctx)
-	if vim.api.nvim_win_is_valid(ctx.prompt_win) then
-		vim.api.nvim_win_close(ctx.prompt_win, true)
-	end
-	if vim.api.nvim_win_is_valid(ctx.results_win) then
-		vim.api.nvim_win_close(ctx.results_win, true)
-	end
-	if vim.api.nvim_win_is_valid(ctx.preview_win) then
-		vim.api.nvim_win_close(ctx.preview_win, true)
+local function close_ui()
+	for _, part in ipairs({ prompt, results, preview }) do
+		if vim.api.nvim_win_is_valid(part.win) then
+			vim.api.nvim_win_close(part.win, true)
+		end
 	end
 end
 
----@param ctx AppContext
-local function send_to_quickfix(ctx)
+local function send_to_quickfix()
 	local entries = {}
-	for _, item in ipairs(ctx.current_results) do
+	for _, item in ipairs(results.items) do
 		if item.bufnr then
 			table.insert(entries, { bufnr = item.bufnr, lnum = 1 })
 		elseif item.path ~= "" then
 			table.insert(entries, { filename = item.path, lnum = item.lnum or 1, col = item.col, text = item.text })
 		end
 	end
-	close_ui(ctx)
+	close_ui()
 	vim.cmd.stopinsert()
 	vim.fn.setqflist(entries, "r")
 	vim.cmd.copen()
 end
 
----@param ctx AppContext
----@param item ListItem
+---@param item table
 ---@param lines string[]
----@return boolean
-local function set_preview_lines(ctx, item, lines)
-	if ctx.current_results[ctx.last_line] ~= item or not vim.api.nvim_win_is_valid(ctx.preview_win) then
+local function set_preview_lines(item, lines)
+	if results.items[results.last_line] ~= item or not vim.api.nvim_win_is_valid(preview.win) then
 		return false
 	end
 
-	vim.treesitter.stop(ctx.preview_buf)
-	vim.bo[ctx.preview_buf].modifiable = true
-	vim.api.nvim_buf_set_lines(ctx.preview_buf, 0, -1, false, lines)
-	vim.bo[ctx.preview_buf].modifiable = false
+	vim.treesitter.stop(preview.buf)
+	vim.bo[preview.buf].modifiable = true
+	vim.api.nvim_buf_set_lines(preview.buf, 0, -1, false, lines)
+	vim.bo[preview.buf].modifiable = false
 	return true
 end
 
----@param ctx AppContext
----@param item ListItem
+---@param item table
 ---@param lines string[]
 ---@param ft string|nil
-local function show_preview(ctx, item, lines, ft)
+local function show_preview(item, lines, ft)
 	-- Limit lines for performance
-	local limit = math.max(500, (item.lnum or 0) + 100)
+	local limit = math.max(PREVIEW_MIN_LINES, (item.lnum or 0) + PREVIEW_LINES_AFTER_MATCH)
 	if #lines > limit then
 		lines = vim.list_slice(lines, 1, limit)
 		table.insert(lines, "")
 		table.insert(lines, "... (truncated)")
 	end
 
-	if not set_preview_lines(ctx, item, lines) then
+	if not set_preview_lines(item, lines) then
 		return
 	end
 
 	local lang = ft and ft ~= "" and vim.treesitter.language.get_lang(ft)
 	if lang then
-		pcall(vim.treesitter.start, ctx.preview_buf, lang)
+		pcall(vim.treesitter.start, preview.buf, lang)
 	end
 
-	vim.wo[ctx.preview_win].cursorline = item.lnum ~= nil
-	vim.api.nvim_win_set_cursor(ctx.preview_win, { math.max(1, math.min(item.lnum or 1, #lines)), 0 })
+	vim.wo[preview.win].cursorline = item.lnum ~= nil
+	vim.api.nvim_win_set_cursor(preview.win, { math.max(1, math.min(item.lnum or 1, #lines)), 0 })
 	if item.lnum then
-		vim.api.nvim_win_call(ctx.preview_win, function()
+		vim.api.nvim_win_call(preview.win, function()
 			vim.cmd("normal! zz")
 		end)
 	end
 
 	-- Update window title with filename
-	vim.api.nvim_win_set_config(ctx.preview_win, {
+	vim.api.nvim_win_set_config(preview.win, {
 		title = " " .. vim.fn.fnamemodify(item.path, ":t") .. " ",
 		title_pos = "center",
 	})
 end
 
----@param ctx AppContext
----@param item ListItem
-local function update_preview(ctx, item)
-	local filepath = item.path
-
+---@param item table
+local function update_preview(item)
 	if item.bufnr then
-		show_preview(ctx, item, vim.api.nvim_buf_get_lines(item.bufnr, 0, -1, false), vim.bo[item.bufnr].filetype)
+		show_preview(item, vim.api.nvim_buf_get_lines(item.bufnr, 0, -1, false), vim.bo[item.bufnr].filetype)
 		return
 	end
 
-	if vim.fn.filereadable(filepath) == 0 then
-		set_preview_lines(ctx, item, { "File not found: " .. filepath })
+	if vim.fn.filereadable(item.path) == 0 then
+		set_preview_lines(item, { "File not found: " .. item.path })
 		return
 	end
 
 	local function show_read_error()
 		vim.schedule(function()
-			set_preview_lines(ctx, item, { "Error reading file" })
+			set_preview_lines(item, { "Error reading file" })
 		end)
 	end
 
-	vim.uv.fs_open(filepath, "r", 438, function(open_err, fd)
+	vim.uv.fs_open(item.path, "r", 438, function(open_err, fd)
 		if open_err or not fd then
 			show_read_error()
 			return
@@ -540,121 +470,108 @@ local function update_preview(ctx, item)
 					if lines[#lines] == "" then
 						table.remove(lines)
 					end
-					show_preview(ctx, item, lines, vim.filetype.match({ filename = filepath }))
+					show_preview(item, lines, vim.filetype.match({ filename = item.path }))
 				end)
 			end)
 		end)
 	end)
 end
 
----@param ctx AppContext
----@param mode Mode
----@param resume boolean
-local function show_tree_ui(ctx, mode, resume)
-	local resume_line = ctx.last_line
-	ctx.mode = mode
-	ctx.origin_buf = vim.api.nvim_get_current_buf()
-	ctx.last_line = -1
+---@param buf_options table
+---@param enter boolean
+---@param config table
+local function open_float(buf_options, enter, config)
+	local buf = vim.api.nvim_create_buf(false, true)
+	for option, value in pairs(buf_options) do
+		vim.bo[buf][option] = value
+	end
+	config.relative = "editor"
+	config.border = "rounded"
+	return buf, vim.api.nvim_open_win(buf, enter, config)
+end
 
-	local width = math.floor(vim.o.columns * 0.9)
+---@param list_output fun(pattern: string, origin_buf: integer): table[]
+---@param start_insert boolean
+---@param resume boolean
+local function show(list_output, start_insert, resume)
+	local resume_line = results.last_line
+	state.list_output = list_output
+	state.start_insert = start_insert
+	state.origin_buf = vim.api.nvim_get_current_buf()
+	state.files = nil
+	results.last_line = -1
+
+	local width = math.floor(vim.o.columns * WIDTH_RATIO)
 	local start_col = math.floor((vim.o.columns - width) / 2)
 
-	local height = vim.o.lines - 9
-	local results_width = math.floor(width * 0.4)
+	local height = vim.o.lines - HEIGHT_MARGIN
+	local results_width = math.floor(width * RESULTS_WIDTH_RATIO)
 	local preview_width = width - results_width - 1
-	local start_row = 4
 
-	ctx.prompt_buf = vim.api.nvim_create_buf(false, true)
-	vim.bo[ctx.prompt_buf].buftype = "prompt"
-	vim.bo[ctx.prompt_buf].bufhidden = "wipe"
-	vim.fn.prompt_setprompt(ctx.prompt_buf, "> ")
-	ctx.prompt_win = vim.api.nvim_open_win(ctx.prompt_buf, true, {
-		relative = "editor",
+	prompt.buf, prompt.win = open_float({ buftype = "prompt", bufhidden = "wipe" }, true, {
 		width = width,
 		height = 1,
 		row = 1,
 		col = start_col,
 		style = "minimal",
-		border = "rounded",
 	})
-	vim.wo[ctx.prompt_win].winhighlight = WINHIGHLIGHT.active
+	vim.fn.prompt_setprompt(prompt.buf, PROMPT)
+	vim.wo[prompt.win].winhighlight = WINHIGHLIGHT.active
 
-	ctx.results_buf = vim.api.nvim_create_buf(false, true)
-	vim.bo[ctx.results_buf].buftype = "nofile"
-	vim.bo[ctx.results_buf].bufhidden = "wipe"
-	vim.bo[ctx.results_buf].modifiable = false
-	ctx.results_win = vim.api.nvim_open_win(ctx.results_buf, false, {
-		relative = "editor",
+	results.buf, results.win = open_float({ buftype = "nofile", bufhidden = "wipe", modifiable = false }, false, {
 		width = results_width - 1,
 		height = height,
-		row = start_row,
+		row = START_ROW,
 		col = start_col,
 		style = "minimal",
-		border = "rounded",
 	})
-	vim.wo[ctx.results_win].cursorline = true
-	vim.wo[ctx.results_win].winhighlight = WINHIGHLIGHT.default
+	vim.wo[results.win].cursorline = true
+	vim.wo[results.win].winhighlight = WINHIGHLIGHT.default
 
-	ctx.preview_buf = vim.api.nvim_create_buf(false, true)
-	vim.bo[ctx.preview_buf].buftype = "nofile"
-	vim.bo[ctx.preview_buf].modifiable = false
-	ctx.preview_win = vim.api.nvim_open_win(ctx.preview_buf, false, {
-		relative = "editor",
+	preview.buf, preview.win = open_float({ buftype = "nofile", modifiable = false }, false, {
 		width = preview_width,
 		height = height,
 		col = start_col + results_width + 1,
-		row = start_row,
-		border = "rounded",
+		row = START_ROW,
 		title = " Preview ",
 		title_pos = "center",
 	})
-	vim.wo[ctx.preview_win].number = false
-	vim.wo[ctx.preview_win].winhighlight = WINHIGHLIGHT.default
+	vim.wo[preview.win].number = false
+	vim.wo[preview.win].winhighlight = WINHIGHLIGHT.default
 
 	vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
-		buffer = ctx.prompt_buf,
+		buffer = prompt.buf,
 		callback = function()
-			local text = vim.api.nvim_buf_get_lines(ctx.prompt_buf, 0, 1, false)[1]
-			text = text:gsub("^> ", "")
-			ctx.prompt_text = text
-			update_results(ctx, text)
+			local text = vim.api.nvim_buf_get_lines(prompt.buf, 0, 1, false)[1]
+			text = text:gsub("^" .. vim.pesc(PROMPT), "")
+			prompt.text = text
+			update_results(list_output, text, state.origin_buf)
 		end,
 	})
 
-	vim.keymap.set("n", "<Esc>", function()
-		vim.api.nvim_set_current_win(ctx.results_win)
-	end, { buffer = ctx.prompt_buf })
-	vim.keymap.set("i", "<Esc>", function()
-		vim.api.nvim_set_current_win(ctx.results_win)
-	end, { buffer = ctx.prompt_buf })
+	vim.keymap.set({ "n", "i" }, "<Esc>", function()
+		vim.api.nvim_set_current_win(results.win)
+	end, { buffer = prompt.buf })
+	vim.keymap.set("n", "<Esc>", close_ui, { buffer = results.buf })
 
-	vim.keymap.set("n", "<Esc>", function()
-		close_ui(ctx)
-	end, { buffer = ctx.results_buf })
-
-	vim.keymap.set({ "n", "i" }, "<C-q>", function()
-		send_to_quickfix(ctx)
-	end, { buffer = ctx.prompt_buf })
-	vim.keymap.set("n", "<C-q>", function()
-		send_to_quickfix(ctx)
-	end, { buffer = ctx.results_buf })
+	vim.keymap.set({ "n", "i" }, "<C-q>", send_to_quickfix, { buffer = prompt.buf })
+	vim.keymap.set("n", "<C-q>", send_to_quickfix, { buffer = results.buf })
 
 	vim.api.nvim_create_autocmd("CursorMoved", {
-		buffer = ctx.results_buf,
+		buffer = results.buf,
 		callback = function()
 			local line_num = vim.api.nvim_win_get_cursor(0)[1]
-			if line_num ~= ctx.last_line then
-				ctx.last_line = line_num
-				local item = ctx.current_results[line_num]
-				update_preview(ctx, item)
+			if line_num ~= results.last_line then
+				results.last_line = line_num
+				update_preview(results.items[line_num])
 			end
 		end,
 	})
 
 	vim.keymap.set("n", "<CR>", function()
 		local line_num = vim.api.nvim_win_get_cursor(0)[1]
-		local item = ctx.current_results[line_num]
-		close_ui(ctx)
+		local item = results.items[line_num]
+		close_ui()
 		if item.bufnr then
 			vim.cmd.buffer(item.bufnr)
 		else
@@ -663,191 +580,85 @@ local function show_tree_ui(ctx, mode, resume)
 		if item.lnum then
 			pcall(vim.api.nvim_win_set_cursor, 0, { item.lnum, (item.col or 1) - 1 })
 		end
-	end, { buffer = ctx.results_buf })
+	end, { buffer = results.buf })
 
-	vim.api.nvim_create_autocmd("WinClosed", {
-		pattern = tostring(ctx.prompt_win),
-		callback = function()
-			close_ui(ctx)
-		end,
-		once = true,
-	})
-	vim.api.nvim_create_autocmd("WinClosed", {
-		pattern = tostring(ctx.results_win),
-		callback = function()
-			close_ui(ctx)
-		end,
-		once = true,
-	})
-	vim.api.nvim_create_autocmd("WinClosed", {
-		pattern = tostring(ctx.preview_buf),
-		callback = function()
-			close_ui(ctx)
-		end,
-		once = true,
-	})
+	for _, part in ipairs({ prompt, results, preview }) do
+		vim.api.nvim_create_autocmd("WinClosed", {
+			pattern = tostring(part.win),
+			callback = close_ui,
+			once = true,
+		})
+		vim.api.nvim_create_autocmd("WinEnter", {
+			buffer = part.buf,
+			callback = function()
+				vim.wo[part.win].winhighlight = WINHIGHLIGHT.active
+			end,
+		})
+		vim.api.nvim_create_autocmd("WinLeave", {
+			buffer = part.buf,
+			callback = function()
+				vim.wo[part.win].winhighlight = WINHIGHLIGHT.default
+				vim.schedule(function()
+					local win = vim.api.nvim_get_current_win()
+					if win ~= prompt.win and win ~= results.win and win ~= preview.win then
+						close_ui()
+					end
+				end)
+			end,
+		})
+	end
 
-	vim.api.nvim_create_autocmd("WinLeave", {
-		buffer = ctx.prompt_buf,
-		callback = function()
-			vim.schedule(function()
-				if
-					vim.api.nvim_get_current_win() ~= ctx.prompt_win
-					and vim.api.nvim_get_current_win() ~= ctx.results_win
-					and vim.api.nvim_get_current_win() ~= ctx.preview_win
-				then
-					close_ui(ctx)
-				end
-			end)
-		end,
-	})
-	vim.api.nvim_create_autocmd("WinLeave", {
-		buffer = ctx.results_buf,
-		callback = function()
-			vim.schedule(function()
-				if
-					vim.api.nvim_get_current_win() ~= ctx.prompt_win
-					and vim.api.nvim_get_current_win() ~= ctx.results_win
-					and vim.api.nvim_get_current_win() ~= ctx.preview_win
-				then
-					close_ui(ctx)
-				end
-			end)
-		end,
-	})
-	vim.api.nvim_create_autocmd("WinLeave", {
-		buffer = ctx.preview_buf,
-		callback = function()
-			vim.schedule(function()
-				if
-					vim.api.nvim_get_current_win() ~= ctx.prompt_win
-					and vim.api.nvim_get_current_win() ~= ctx.results_win
-					and vim.api.nvim_get_current_win() ~= ctx.preview_win
-				then
-					close_ui(ctx)
-				end
-			end)
-		end,
-	})
-
-	vim.api.nvim_create_autocmd("WinEnter", {
-		buffer = ctx.prompt_buf,
-		callback = function()
-			vim.wo[ctx.prompt_win].winhighlight = WINHIGHLIGHT.active
-		end,
-	})
-	vim.api.nvim_create_autocmd("WinLeave", {
-		buffer = ctx.prompt_buf,
-		callback = function()
-			vim.wo[ctx.prompt_win].winhighlight = WINHIGHLIGHT.default
-		end,
-	})
-	vim.api.nvim_create_autocmd("WinEnter", {
-		buffer = ctx.results_buf,
-		callback = function()
-			vim.wo[ctx.results_win].winhighlight = WINHIGHLIGHT.active
-		end,
-	})
-	vim.api.nvim_create_autocmd("WinLeave", {
-		buffer = ctx.results_buf,
-		callback = function()
-			vim.wo[ctx.results_win].winhighlight = WINHIGHLIGHT.default
-		end,
-	})
-	vim.api.nvim_create_autocmd("WinEnter", {
-		buffer = ctx.preview_buf,
-		callback = function()
-			vim.wo[ctx.preview_win].winhighlight = WINHIGHLIGHT.active
-		end,
-	})
-	vim.api.nvim_create_autocmd("WinLeave", {
-		buffer = ctx.preview_buf,
-		callback = function()
-			vim.wo[ctx.preview_win].winhighlight = WINHIGHLIGHT.default
-		end,
-	})
-
-	if not resume and mode.initial_mode == "insert" then
+	if not resume and start_insert then
 		vim.cmd.startinsert()
 		return
 	end
 
 	local line = 1
 	if resume then
-		vim.api.nvim_buf_set_lines(ctx.prompt_buf, 0, -1, false, { "> " .. ctx.prompt_text })
-		update_results(ctx, ctx.prompt_text)
-		line = math.max(1, math.min(resume_line, #ctx.current_results))
+		vim.api.nvim_buf_set_lines(prompt.buf, 0, -1, false, { PROMPT .. prompt.text })
+		update_results(list_output, prompt.text, state.origin_buf)
+		line = math.max(1, math.min(resume_line, #results.items))
 	else
-		ctx.prompt_text = ""
-		update_results(ctx, "")
+		prompt.text = ""
+		update_results(list_output, "", state.origin_buf)
 	end
-	vim.api.nvim_set_current_win(ctx.results_win)
-	vim.api.nvim_win_set_cursor(ctx.results_win, { line, 0 })
-	ctx.last_line = line
-	update_preview(ctx, ctx.current_results[line])
+	vim.api.nvim_set_current_win(results.win)
+	vim.api.nvim_win_set_cursor(results.win, { line, 0 })
+	results.last_line = line
+	update_preview(results.items[line])
 end
 
----@type AppContext
-local ctx
-
-function M.setup(opts)
-	opts = opts or {}
-
-	vim.api.nvim_set_hl(0, "TreePrefix", { fg = "#6c6c6c", bold = true }) -- Blue for directories
-	vim.api.nvim_set_hl(0, "TreeDirectory", { fg = "#0d73e8", bold = true }) -- Blue for directories
-	vim.api.nvim_set_hl(0, "TreeFile", { link = "Normal" }) -- Normal color for files
-	vim.api.nvim_set_hl(0, "FuzzyMagikNormal", { link = "Normal" })
-	vim.api.nvim_set_hl(0, "FuzzyMagikBorder", { fg = "#6c6c6c" })
-	vim.api.nvim_set_hl(0, "FuzzyMagikBorderActive", { fg = "#00ffd7" })
-	vim.api.nvim_set_hl(0, "FuzzyMagikMatch", { fg = "#0d73e8", bold = true })
-	vim.api.nvim_set_hl(0, "FuzzyMagikExtension", { fg = "#5fd700" })
-	vim.api.nvim_set_hl(0, "FuzzyMagikPath", { fg = "#af87d7" })
-	vim.api.nvim_set_hl(0, "FuzzyMagikLineNr", { fg = "#6c6c6c" })
-	vim.api.nvim_set_hl(0, "FuzzyMagikKind", { fg = "#d7af5f" })
-	vim.api.nvim_set_hl(0, "FuzzyMagikGitStaged", { fg = "#5fd700" })
-	vim.api.nvim_set_hl(0, "FuzzyMagikGitUnstaged", { fg = "#d75f5f" })
-	vim.api.nvim_set_hl(0, "FuzzyMagikGitUntracked", { fg = "#6c6c6c" })
-
-	ctx = {
-		prompt_win = 0,
-		prompt_buf = 0,
-		results_win = 0,
-		results_buf = 0,
-		preview_win = 0,
-		preview_buf = 0,
-		current_results = {},
-		last_line = -1,
-		mode = nil,
-		origin_buf = 0,
-		prompt_text = "",
-	}
+function M.setup()
+	for name, hl in pairs(HIGHLIGHTS) do
+		vim.api.nvim_set_hl(0, name, hl)
+	end
 end
 
 function M.find_files()
-	show_tree_ui(ctx, MODES.files, false)
+	show(create_find_files_output, true, false)
 end
 
 function M.live_grep()
-	show_tree_ui(ctx, MODES.grep, false)
+	show(create_grep_output, true, false)
 end
 
 function M.buffers()
-	show_tree_ui(ctx, MODES.buffers, false)
+	show(create_buffers_output, false, false)
 end
 
 function M.lsp_dynamic_workspace_symbols()
-	show_tree_ui(ctx, MODES.workspace_symbols, false)
+	show(create_workspace_symbols_output, true, false)
 end
 
 function M.git_status()
-	show_tree_ui(ctx, MODES.git_status, false)
+	show(create_git_status_output, false, false)
 end
 
 function M.resume()
-	if not ctx.mode then
+	if not state.list_output then
 		return
 	end
-	show_tree_ui(ctx, ctx.mode, true)
+	show(state.list_output, state.start_insert, true)
 end
 
 return M
