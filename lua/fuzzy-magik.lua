@@ -331,6 +331,60 @@ local function create_git_status_output(pattern)
 	return items
 end
 
+---@param pattern string
+local function create_diagnostics_output(pattern)
+	local diagnostics = vim.diagnostic.get()
+	table.sort(diagnostics, function(a, b)
+		if a.severity ~= b.severity then
+			return a.severity < b.severity
+		end
+		if a.bufnr ~= b.bufnr then
+			return a.bufnr < b.bufnr
+		end
+		return a.lnum < b.lnum
+	end)
+
+	local items = {}
+	for _, diagnostic in ipairs(diagnostics) do
+		local severity = vim.diagnostic.severity[diagnostic.severity]
+		local filepath = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(diagnostic.bufnr), ":.")
+		local location = ":" .. diagnostic.lnum + 1 .. ":" .. diagnostic.col + 1 .. ": "
+		local text = diagnostic.message:gsub("\n", " ")
+		local body = filepath .. location .. text
+		local cols = fuzzy_match_cols(body, pattern)
+		if cols then
+			local line = #items
+			local prefix = severity:sub(1, 1) .. " "
+			table.insert(highlights, {
+				line = line,
+				col_start = 0,
+				col_end = 1,
+				hl_group = "Diagnostic" .. severity:sub(1, 1) .. severity:sub(2):lower(),
+			})
+			add_path_highlights(line, #prefix, filepath)
+			table.insert(highlights, {
+				line = line,
+				col_start = #prefix + #filepath,
+				col_end = #prefix + #filepath + #location,
+				hl_group = "FuzzyMagikLineNr",
+			})
+			add_match_highlights(line, #prefix, cols)
+			table.insert(items, {
+				line = prefix .. body,
+				path = filepath,
+				lnum = diagnostic.lnum + 1,
+				col = diagnostic.col + 1,
+				text = text,
+			})
+		end
+	end
+
+	if #items == 0 then
+		return message("No diagnostics matching pattern: " .. pattern)
+	end
+	return items
+end
+
 ---@param list_output fun(pattern: string, origin_buf: integer): table[]
 ---@param pattern string
 ---@param origin_buf integer
@@ -652,6 +706,10 @@ end
 
 function M.git_status()
 	show(create_git_status_output, false, false)
+end
+
+function M.diagnostics()
+	show(create_diagnostics_output, false, false)
 end
 
 function M.resume()

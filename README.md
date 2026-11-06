@@ -25,6 +25,9 @@ end)
 vim.keymap.set("n", "<Space>s", function()
 	require("fuzzy-magik").git_status()
 end)
+vim.keymap.set("n", "<Space>d", function()
+	require("fuzzy-magik").diagnostics()
+end)
 ```
 
 ## Requirements
