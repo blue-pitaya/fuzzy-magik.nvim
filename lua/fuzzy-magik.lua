@@ -232,11 +232,44 @@ end
 
 ---@param ctx AppContext
 ---@param pattern string
+---@return ListItem[]
+---@return table[]
+local function create_list_output(ctx, pattern)
+	local chars = {}
+	for char in pattern:gmatch(".") do
+		table.insert(chars, char)
+	end
+	local fuzzy_pattern = table.concat(chars, ".*")
+	local escaped_pattern = vim.fn.shellescape(fuzzy_pattern)
+	local cmd = string.format("rg --files | rg -i %s", escaped_pattern)
+	local result = vim.system({ "sh", "-c", cmd }, { text = true }):wait()
+	if result.code ~= 0 then
+		return { { line = "No files found matching pattern: " .. pattern, path = "" } }, {}
+	end
+
+	local files = vim.split(result.stdout or "", "\n", { trimempty = true })
+	if #files == 0 then
+		return { { line = "No files found matching pattern: " .. pattern, path = "" } }, {}
+	end
+
+	local items = {}
+	for _, filepath in ipairs(files) do
+		table.insert(items, {
+			line = filepath,
+			path = filepath,
+		})
+	end
+
+	return items, {}
+end
+
+---@param ctx AppContext
+---@param pattern string
 local function update_results(ctx, pattern)
 	vim.bo[ctx.results_buf].modifiable = true
 
 	local highlights = {}
-	ctx.current_results, highlights = create_tree_output(ctx, pattern)
+	ctx.current_results, highlights = create_list_output(ctx, pattern)
 	local lines = {}
 	for _, item in ipairs(ctx.current_results) do
 		table.insert(lines, item.line)
