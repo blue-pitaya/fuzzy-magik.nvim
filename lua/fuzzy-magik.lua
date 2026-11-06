@@ -50,6 +50,11 @@ local TREE_CHARS = {
 	space = "  ",
 }
 
+local WINHIGHLIGHT = {
+	default = "Normal:FuzzyMagikNormal,NormalFloat:FuzzyMagikNormal,FloatBorder:FuzzyMagikBorder",
+	active = "Normal:FuzzyMagikNormal,NormalFloat:FuzzyMagikNormal,FloatBorder:FuzzyMagikBorderActive",
+}
+
 ---@param files string[]
 ---@return TreeNode
 local function build_tree(files)
@@ -252,15 +257,33 @@ local function create_list_output(ctx, pattern)
 		return { { line = "No files found matching pattern: " .. pattern, path = "" } }, {}
 	end
 
+	local lower_pattern = pattern:lower()
 	local items = {}
-	for _, filepath in ipairs(files) do
+	local highlights = {}
+	for i, filepath in ipairs(files) do
+		local lower_path = filepath:lower()
+		local search_from = 1
+		for char in lower_pattern:gmatch(".") do
+			local col = lower_path:find(char, search_from, true)
+			if not col then
+				break
+			end
+			table.insert(highlights, {
+				line = i - 1,
+				col_start = col - 1,
+				col_end = col,
+				hl_group = "FuzzyMagikMatch",
+			})
+			search_from = col + 1
+		end
+
 		table.insert(items, {
 			line = filepath,
 			path = filepath,
 		})
 	end
 
-	return items, {}
+	return items, highlights
 end
 
 ---@param ctx AppContext
@@ -369,6 +392,7 @@ local function show_tree_ui(ctx)
 		style = "minimal",
 		border = "rounded",
 	})
+	vim.wo[ctx.prompt_win].winhighlight = WINHIGHLIGHT.active
 
 	ctx.results_buf = vim.api.nvim_create_buf(false, true)
 	vim.bo[ctx.results_buf].buftype = "nofile"
@@ -384,6 +408,7 @@ local function show_tree_ui(ctx)
 		border = "rounded",
 	})
 	vim.wo[ctx.results_win].cursorline = true
+	vim.wo[ctx.results_win].winhighlight = WINHIGHLIGHT.default
 
 	ctx.preview_buf = vim.api.nvim_create_buf(false, true)
 	vim.bo[ctx.preview_buf].buftype = "nofile"
@@ -399,6 +424,7 @@ local function show_tree_ui(ctx)
 		title_pos = "center",
 	})
 	vim.wo[ctx.preview_win].number = false
+	vim.wo[ctx.preview_win].winhighlight = WINHIGHLIGHT.default
 
 	vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
 		buffer = ctx.prompt_buf,
@@ -504,6 +530,43 @@ local function show_tree_ui(ctx)
 		end,
 	})
 
+	vim.api.nvim_create_autocmd("WinEnter", {
+		buffer = ctx.prompt_buf,
+		callback = function()
+			vim.wo[ctx.prompt_win].winhighlight = WINHIGHLIGHT.active
+		end,
+	})
+	vim.api.nvim_create_autocmd("WinLeave", {
+		buffer = ctx.prompt_buf,
+		callback = function()
+			vim.wo[ctx.prompt_win].winhighlight = WINHIGHLIGHT.default
+		end,
+	})
+	vim.api.nvim_create_autocmd("WinEnter", {
+		buffer = ctx.results_buf,
+		callback = function()
+			vim.wo[ctx.results_win].winhighlight = WINHIGHLIGHT.active
+		end,
+	})
+	vim.api.nvim_create_autocmd("WinLeave", {
+		buffer = ctx.results_buf,
+		callback = function()
+			vim.wo[ctx.results_win].winhighlight = WINHIGHLIGHT.default
+		end,
+	})
+	vim.api.nvim_create_autocmd("WinEnter", {
+		buffer = ctx.preview_buf,
+		callback = function()
+			vim.wo[ctx.preview_win].winhighlight = WINHIGHLIGHT.active
+		end,
+	})
+	vim.api.nvim_create_autocmd("WinLeave", {
+		buffer = ctx.preview_buf,
+		callback = function()
+			vim.wo[ctx.preview_win].winhighlight = WINHIGHLIGHT.default
+		end,
+	})
+
 	vim.cmd.startinsert()
 end
 
@@ -516,6 +579,10 @@ function M.setup(opts)
 	vim.api.nvim_set_hl(0, "TreePrefix", { fg = "#6c6c6c", bold = true }) -- Blue for directories
 	vim.api.nvim_set_hl(0, "TreeDirectory", { fg = "#0d73e8", bold = true }) -- Blue for directories
 	vim.api.nvim_set_hl(0, "TreeFile", { link = "Normal" }) -- Normal color for files
+	vim.api.nvim_set_hl(0, "FuzzyMagikNormal", { link = "Normal" })
+	vim.api.nvim_set_hl(0, "FuzzyMagikBorder", { fg = "#6c6c6c" })
+	vim.api.nvim_set_hl(0, "FuzzyMagikBorderActive", { fg = "#00ffd7" })
+	vim.api.nvim_set_hl(0, "FuzzyMagikMatch", { fg = "#0d73e8", bold = true })
 
 	local has_devicons, devicons = pcall(require, "nvim-web-devicons")
 
