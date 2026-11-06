@@ -288,12 +288,106 @@ local function create_workspace_symbols_output(pattern, ctx)
 	return items, highlights
 end
 
+---@param pattern string
+---@return ListItem[]
+---@return table[]
+local function create_git_status_output(pattern)
+	local root = vim.system({ "git", "rev-parse", "--show-toplevel" }, { text = true }):wait()
+	if root.code ~= 0 then
+		return { { line = "Not a git repository", path = "" } }, {}
+	end
+	local root_dir = vim.trim(root.stdout or "")
+
+	local result = vim.system({ "git", "status", "--porcelain=v1", "-z", "--untracked-files=all" }, { text = true })
+		:wait()
+	if result.code ~= 0 then
+		return { { line = "git status failed", path = "" } }, {}
+	end
+
+	local entries = vim.split(result.stdout or "", "\0", { plain = true, trimempty = true })
+	local lower_pattern = pattern:lower()
+	local items = {}
+	local highlights = {}
+	local i = 1
+	while i <= #entries do
+		local entry = entries[i]
+		local status = entry:sub(1, 2)
+		local filepath = vim.fn.fnamemodify(root_dir .. "/" .. entry:sub(4), ":.")
+		if status:find("[RC]") then
+			i = i + 1
+		end
+		i = i + 1
+
+		local lower_path = filepath:lower()
+		local match_cols = {}
+		local search_from = 1
+		for char in lower_pattern:gmatch(".") do
+			local col = lower_path:find(char, search_from, true)
+			if not col then
+				match_cols = nil
+				break
+			end
+			table.insert(match_cols, col)
+			search_from = col + 1
+		end
+
+		if match_cols then
+			local line = #items
+			local prefix = status .. " "
+			if status == "??" then
+				table.insert(highlights, {
+					line = line,
+					col_start = 0,
+					col_end = 2,
+					hl_group = "FuzzyMagikGitUntracked",
+				})
+			else
+				if status:sub(1, 1) ~= " " then
+					table.insert(highlights, {
+						line = line,
+						col_start = 0,
+						col_end = 1,
+						hl_group = "FuzzyMagikGitStaged",
+					})
+				end
+				if status:sub(2, 2) ~= " " then
+					table.insert(highlights, {
+						line = line,
+						col_start = 1,
+						col_end = 2,
+						hl_group = "FuzzyMagikGitUnstaged",
+					})
+				end
+			end
+			add_path_highlights(highlights, line, #prefix, filepath)
+			for _, col in ipairs(match_cols) do
+				table.insert(highlights, {
+					line = line,
+					col_start = #prefix + col - 1,
+					col_end = #prefix + col,
+					hl_group = "FuzzyMagikMatch",
+				})
+			end
+			table.insert(items, {
+				line = prefix .. filepath,
+				path = filepath,
+			})
+		end
+	end
+
+	if #items == 0 then
+		return { { line = "No changed files matching pattern: " .. pattern, path = "" } }, {}
+	end
+	return items, highlights
+end
+
 ---@type table<string, Mode>
 local MODES = {
 	files = { list_output = create_list_output, initial_mode = "insert" },
 	grep = { list_output = create_grep_output, initial_mode = "insert" },
 	buffers = { list_output = create_buffers_output, initial_mode = "normal" },
 	workspace_symbols = { list_output = create_workspace_symbols_output, initial_mode = "insert" },
+	git_status = { list_output = create_git_status_output, initial_mode = "normal" },
 }
 
 ---@param ctx AppContext
@@ -710,6 +804,9 @@ function M.setup(opts)
 	vim.api.nvim_set_hl(0, "FuzzyMagikPath", { fg = "#af87d7" })
 	vim.api.nvim_set_hl(0, "FuzzyMagikLineNr", { fg = "#6c6c6c" })
 	vim.api.nvim_set_hl(0, "FuzzyMagikKind", { fg = "#d7af5f" })
+	vim.api.nvim_set_hl(0, "FuzzyMagikGitStaged", { fg = "#5fd700" })
+	vim.api.nvim_set_hl(0, "FuzzyMagikGitUnstaged", { fg = "#d75f5f" })
+	vim.api.nvim_set_hl(0, "FuzzyMagikGitUntracked", { fg = "#6c6c6c" })
 
 	ctx = {
 		prompt_win = 0,
@@ -740,6 +837,10 @@ end
 
 function M.lsp_dynamic_workspace_symbols()
 	show_tree_ui(ctx, MODES.workspace_symbols, false)
+end
+
+function M.git_status()
+	show_tree_ui(ctx, MODES.git_status, false)
 end
 
 function M.resume()

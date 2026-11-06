@@ -22,6 +22,9 @@ end)
 vim.keymap.set("n", "<Space>n", function()
 	require("fuzzy-magik").lsp_dynamic_workspace_symbols()
 end)
+vim.keymap.set("n", "<Space>s", function()
+	require("fuzzy-magik").git_status()
+end)
 ```
 
 ## Requirements
