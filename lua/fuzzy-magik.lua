@@ -7,16 +7,16 @@ local WINHIGHLIGHT = {
 
 local HIGHLIGHTS = {
 	FuzzyMagikNormal = { link = "Normal" },
-	FuzzyMagikBorder = { fg = "#6c6c6c" },
-	FuzzyMagikBorderActive = { fg = "#00ffd7" },
-	FuzzyMagikMatch = { fg = "#0d73e8", bold = true },
-	FuzzyMagikExtension = { fg = "#5fd700" },
-	FuzzyMagikPath = { fg = "#af87d7" },
-	FuzzyMagikLineNr = { fg = "#6c6c6c" },
-	FuzzyMagikKind = { fg = "#d7af5f" },
-	FuzzyMagikGitStaged = { fg = "#5fd700" },
-	FuzzyMagikGitUnstaged = { fg = "#d75f5f" },
-	FuzzyMagikGitUntracked = { fg = "#6c6c6c" },
+	FuzzyMagikBorder = { fg = "#767676" },
+	FuzzyMagikBorderActive = { fg = "#00ffff" },
+	FuzzyMagikMatch = { fg = "#00afd7", bold = true },
+	FuzzyMagikExtension = { fg = "#b8bb26" },
+	FuzzyMagikPath = { fg = "#bb9af7" },
+	FuzzyMagikLineNr = { fg = "#767676" },
+	FuzzyMagikKind = { fg = "#f2a475" },
+	FuzzyMagikGitStaged = { fg = "#b8bb26" },
+	FuzzyMagikGitUnstaged = { fg = "#e77969" },
+	FuzzyMagikGitUntracked = { fg = "#767676" },
 }
 
 local PROMPT = "> "
@@ -662,6 +662,9 @@ local function show(list_output, start_insert, resume)
 	})
 
 	vim.keymap.set({ "n", "i" }, "<Esc>", function()
+		vim.api.nvim_set_current_win(results.win)
+	end, { buffer = prompt.buf })
+	vim.keymap.set({ "n", "i" }, "<CR>", function()
 		vim.api.nvim_set_current_win(results.win)
 	end, { buffer = prompt.buf })
 	vim.keymap.set("n", "<Esc>", close_ui, { buffer = results.buf })
