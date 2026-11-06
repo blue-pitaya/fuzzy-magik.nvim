@@ -49,6 +49,7 @@ local state = {
 	list_output = nil,
 	start_insert = nil,
 	files = nil,
+	lsp_locations = nil,
 }
 local highlights = {}
 
@@ -385,6 +386,63 @@ local function create_diagnostics_output(pattern)
 	return items
 end
 
+---@param method string
+local function request_lsp_locations(method)
+	local buf = vim.api.nvim_get_current_buf()
+	local clients = vim.lsp.get_clients({ bufnr = buf, method = method })
+	if #clients == 0 then
+		return {}
+	end
+
+	local params = vim.lsp.util.make_position_params(0, clients[1].offset_encoding)
+	if method == "textDocument/references" then
+		params.context = { includeDeclaration = true }
+	end
+	local responses = vim.lsp.buf_request_sync(buf, method, params, LSP_TIMEOUT_MS)
+	local locations = {}
+	for client_id, response in pairs(responses or {}) do
+		local client = vim.lsp.get_client_by_id(client_id)
+		if client and response.result then
+			local result = vim.islist(response.result) and response.result or { response.result }
+			vim.list_extend(locations, vim.lsp.util.locations_to_items(result, client.offset_encoding))
+		end
+	end
+	return locations
+end
+
+---@param pattern string
+local function create_lsp_locations_output(pattern)
+	local items = {}
+	for _, entry in ipairs(state.lsp_locations) do
+		local filepath = vim.fn.fnamemodify(entry.filename, ":.")
+		local location = ":" .. entry.lnum .. ":" .. entry.col
+		local cols = fuzzy_match_cols(filepath, pattern)
+		if cols then
+			local line = #items
+			add_path_highlights(line, 0, filepath)
+			table.insert(highlights, {
+				line = line,
+				col_start = #filepath,
+				col_end = #filepath + #location,
+				hl_group = "FuzzyMagikLineNr",
+			})
+			add_match_highlights(line, 0, cols)
+			table.insert(items, {
+				line = filepath .. location,
+				path = filepath,
+				lnum = entry.lnum,
+				col = entry.col,
+				text = entry.text,
+			})
+		end
+	end
+
+	if #items == 0 then
+		return message("No locations matching pattern: " .. pattern)
+	end
+	return items
+end
+
 ---@param list_output fun(pattern: string, origin_buf: integer): table[]
 ---@param pattern string
 ---@param origin_buf integer
@@ -682,6 +740,25 @@ local function show(list_output, start_insert, resume)
 	update_preview(results.items[line])
 end
 
+---@param method string
+local function show_lsp_locations(method)
+	state.lsp_locations = request_lsp_locations(method)
+	if #state.lsp_locations == 0 then
+		vim.notify("No locations found")
+		return
+	end
+
+	if #state.lsp_locations == 1 then
+		local entry = state.lsp_locations[1]
+		vim.cmd("normal! m'")
+		vim.cmd.edit(entry.filename)
+		pcall(vim.api.nvim_win_set_cursor, 0, { entry.lnum, entry.col - 1 })
+		return
+	end
+
+	show(create_lsp_locations_output, false, false)
+end
+
 function M.setup()
 	for name, hl in pairs(HIGHLIGHTS) do
 		vim.api.nvim_set_hl(0, name, hl)
@@ -710,6 +787,14 @@ end
 
 function M.diagnostics()
 	show(create_diagnostics_output, false, false)
+end
+
+function M.lsp_definitions()
+	show_lsp_locations("textDocument/definition")
+end
+
+function M.lsp_references()
+	show_lsp_locations("textDocument/references")
 end
 
 function M.resume()

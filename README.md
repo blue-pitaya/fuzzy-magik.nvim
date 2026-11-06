@@ -28,6 +28,12 @@ end)
 vim.keymap.set("n", "<Space>d", function()
 	require("fuzzy-magik").diagnostics()
 end)
+vim.keymap.set("n", "gd", function()
+	require("fuzzy-magik").lsp_definitions()
+end)
+vim.keymap.set("n", "gr", function()
+	require("fuzzy-magik").lsp_references()
+end)
 ```
 
 ## Requirements
