@@ -1,25 +1,16 @@
-# nvim-file-tree-fuzzy-finder
+# fuzzy-magik.nvim
 
-Minimal Neovim plugin for fuzzy file search using the `tree` command.
-
-## Installation
-
-### lazy.nvim
-
-```lua
-return {
-	{
-		dir = "/path/to/this/repo",
-		config = function()
-			require("fuzzy-magik").setup({})
-		end,
-	},
-}
-```
+Minimal Neovim plugin for fuzzy search.
 
 ## Usage
 
-Press `<Space>k` to search.
+The plugin sets no keybindings. Map the finder yourself:
+
+```lua
+vim.keymap.set("n", "<Space><Space>", function()
+	require("fuzzy-magik").find_files()
+end)
+```
 
 ## Requirements
 

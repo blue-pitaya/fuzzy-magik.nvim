@@ -474,6 +474,9 @@ local function show_tree_ui(ctx)
 	vim.cmd.startinsert()
 end
 
+---@type AppContext
+local ctx
+
 function M.setup(opts)
 	opts = opts or {}
 
@@ -483,8 +486,7 @@ function M.setup(opts)
 
 	local has_devicons, devicons = pcall(require, "nvim-web-devicons")
 
-	---@type AppContext
-	local ctx = {
+	ctx = {
 		prompt_win = 0,
 		prompt_buf = 0,
 		results_win = 0,
@@ -496,10 +498,10 @@ function M.setup(opts)
 		devicons = devicons,
 		last_line = -1,
 	}
+end
 
-	vim.keymap.set("n", "<space>k", function()
-		show_tree_ui(ctx)
-	end)
+function M.find_files()
+	show_tree_ui(ctx)
 end
 
 return M
