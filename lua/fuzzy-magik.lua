@@ -48,11 +48,32 @@ local function create_list_output(pattern)
 	if #files == 0 then
 		return { { line = "No files found matching pattern: " .. pattern, path = "" } }, {}
 	end
+	table.sort(files)
 
 	local lower_pattern = pattern:lower()
 	local items = {}
 	local highlights = {}
 	for i, filepath in ipairs(files) do
+		local name_col = filepath:match("()[^/]*$")
+		if name_col > 1 then
+			table.insert(highlights, {
+				line = i - 1,
+				col_start = 0,
+				col_end = name_col - 1,
+				hl_group = "FuzzyMagikPath",
+			})
+		end
+
+		local ext_col = filepath:match("[^/]()%.[^./]+$")
+		if ext_col then
+			table.insert(highlights, {
+				line = i - 1,
+				col_start = ext_col - 1,
+				col_end = #filepath,
+				hl_group = "FuzzyMagikExtension",
+			})
+		end
+
 		local lower_path = filepath:lower()
 		local search_from = 1
 		for char in lower_pattern:gmatch(".") do
@@ -114,6 +135,20 @@ local function close_ui(ctx)
 	if vim.api.nvim_win_is_valid(ctx.preview_win) then
 		vim.api.nvim_win_close(ctx.preview_win, true)
 	end
+end
+
+---@param ctx AppContext
+local function send_to_quickfix(ctx)
+	local entries = {}
+	for _, item in ipairs(ctx.current_results) do
+		if item.path ~= "" then
+			table.insert(entries, { filename = item.path, lnum = 1 })
+		end
+	end
+	close_ui(ctx)
+	vim.cmd.stopinsert()
+	vim.fn.setqflist(entries, "r")
+	vim.cmd.copen()
 end
 
 ---@param ctx AppContext
@@ -236,6 +271,13 @@ local function show_tree_ui(ctx)
 
 	vim.keymap.set("n", "<Esc>", function()
 		close_ui(ctx)
+	end, { buffer = ctx.results_buf })
+
+	vim.keymap.set({ "n", "i" }, "<C-q>", function()
+		send_to_quickfix(ctx)
+	end, { buffer = ctx.prompt_buf })
+	vim.keymap.set("n", "<C-q>", function()
+		send_to_quickfix(ctx)
 	end, { buffer = ctx.results_buf })
 
 	vim.api.nvim_create_autocmd("CursorMoved", {
@@ -375,6 +417,8 @@ function M.setup(opts)
 	vim.api.nvim_set_hl(0, "FuzzyMagikBorder", { fg = "#6c6c6c" })
 	vim.api.nvim_set_hl(0, "FuzzyMagikBorderActive", { fg = "#00ffd7" })
 	vim.api.nvim_set_hl(0, "FuzzyMagikMatch", { fg = "#0d73e8", bold = true })
+	vim.api.nvim_set_hl(0, "FuzzyMagikExtension", { fg = "#5fd700" })
+	vim.api.nvim_set_hl(0, "FuzzyMagikPath", { fg = "#af87d7" })
 
 	ctx = {
 		prompt_win = 0,
