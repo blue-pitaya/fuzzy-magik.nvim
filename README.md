@@ -10,6 +10,18 @@ The plugin sets no keybindings. Map the finder yourself:
 vim.keymap.set("n", "<Space><Space>", function()
 	require("fuzzy-magik").find_files()
 end)
+vim.keymap.set("n", "<Space>g", function()
+	require("fuzzy-magik").live_grep()
+end)
+vim.keymap.set("n", "<Space>r", function()
+	require("fuzzy-magik").resume()
+end)
+vim.keymap.set("n", "<Space>j", function()
+	require("fuzzy-magik").buffers()
+end)
+vim.keymap.set("n", "<Space>n", function()
+	require("fuzzy-magik").lsp_dynamic_workspace_symbols()
+end)
 ```
 
 ## Requirements
