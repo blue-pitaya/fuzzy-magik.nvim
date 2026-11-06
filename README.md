@@ -11,7 +11,7 @@ return {
 	{
 		dir = "/path/to/this/repo",
 		config = function()
-			require("nvim-file-tree-fuzzy-finder").setup({})
+			require("fuzzy-magik").setup({})
 		end,
 	},
 }
