@@ -30,6 +30,15 @@ local PREVIEW_LINES_AFTER_MATCH = 100
 local LSP_TIMEOUT_MS = 1000
 local NAMESPACE = vim.api.nvim_create_namespace("tree_highlights")
 
+---@class FuzzyMagikItem
+---@field line string
+---@field path string
+---@field lnum? integer
+---@field col? integer
+---@field text? string
+---@field bufnr? integer
+---@field is_dir? boolean
+
 local prompt = {
 	win = 0,
 	buf = 0,
@@ -38,6 +47,7 @@ local prompt = {
 local results = {
 	win = 0,
 	buf = 0,
+	---@type FuzzyMagikItem[]
 	items = {},
 	last_line = -1,
 }
@@ -130,6 +140,7 @@ local function create_find_files_output(pattern)
 		table.sort(state.files)
 	end
 
+	---@type FuzzyMagikItem[]
 	local items = {}
 	for _, filepath in ipairs(state.files) do
 		local cols = fuzzy_match_cols(filepath, pattern)
@@ -170,6 +181,7 @@ local function create_grep_output(pattern)
 		return message("No matches for pattern: " .. pattern)
 	end
 
+	---@type FuzzyMagikItem[]
 	local items = {}
 	for _, output_line in ipairs(vim.split(result.stdout or "", "\n", { trimempty = true })) do
 		local filepath, lnum, col, text = output_line:match("^(.-):(%d+):(%d+):(.*)$")
@@ -201,6 +213,7 @@ end
 
 ---@param pattern string
 local function create_buffers_output(pattern)
+	---@type FuzzyMagikItem[]
 	local items = {}
 	for _, info in ipairs(vim.fn.getbufinfo({ buflisted = 1 })) do
 		local name = info.name ~= "" and vim.fn.fnamemodify(info.name, ":.") or "[No Name]"
@@ -227,6 +240,7 @@ end
 ---@param origin_buf integer
 local function create_workspace_symbols_output(pattern, origin_buf)
 	local responses = vim.lsp.buf_request_sync(origin_buf, "workspace/symbol", { query = pattern }, LSP_TIMEOUT_MS)
+	---@type FuzzyMagikItem[]
 	local items = {}
 	for client_id, response in pairs(responses or {}) do
 		local client = vim.lsp.get_client_by_id(client_id)
@@ -285,6 +299,7 @@ local function create_git_status_output(pattern)
 	end
 
 	local entries = vim.split(result.stdout or "", "\0", { plain = true, trimempty = true })
+	---@type FuzzyMagikItem[]
 	local items = {}
 	local i = 1
 	while i <= #entries do
@@ -353,6 +368,7 @@ local function create_diagnostics_output(pattern)
 		return a.lnum < b.lnum
 	end)
 
+	---@type FuzzyMagikItem[]
 	local items = {}
 	for _, diagnostic in ipairs(diagnostics) do
 		local severity = vim.diagnostic.severity[diagnostic.severity]
@@ -420,6 +436,7 @@ end
 
 ---@param pattern string
 local function create_lsp_locations_output(pattern)
+	---@type FuzzyMagikItem[]
 	local items = {}
 	for _, entry in ipairs(state.lsp_locations) do
 		local filepath = vim.fn.fnamemodify(entry.filename, ":.")
@@ -480,6 +497,7 @@ local function create_file_browser_output(pattern)
 	local entries = {}
 	collect_tree_entries(state.browser_dir, 0, entries)
 
+	---@type FuzzyMagikItem[]
 	local items = {}
 	for _, entry in ipairs(entries) do
 		local name = entry.is_dir and entry.name .. "/" or entry.name
@@ -688,9 +706,6 @@ local function target_dir()
 	if item.path == "" then
 		return state.browser_dir
 	end
-	if item.is_dir then
-		return item.path
-	end
 	return vim.fs.dirname(item.path)
 end
 
@@ -835,7 +850,10 @@ local function delete_selected()
 	end
 
 	for _, path in ipairs(paths) do
-		vim.fn.delete(path, "rf")
+		local res = vim.system({ "gio", "trash", path }, { text = true }):wait()
+		if res.code ~= 0 then
+			vim.notify(res.stderr, vim.log.levels.ERROR)
+		end
 		for _, buf in ipairs(buffers_under(path)) do
 			if not vim.bo[buf].modified then
 				pcall(vim.api.nvim_buf_delete, buf, { force = true })
