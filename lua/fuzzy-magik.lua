@@ -60,6 +60,7 @@ local state = {
 	list_output = nil,
 	start_insert = nil,
 	files = nil,
+	show_all_files = false,
 	lsp_locations = nil,
 	browser_dir = nil,
 	expanded = {},
@@ -135,7 +136,12 @@ end
 ---@param pattern string
 local function create_find_files_output(pattern)
 	if not state.files then
-		local result = vim.system({ "rg", "--files" }, { text = true }):wait()
+		local cmd = { "rg", "--files" }
+		if state.show_all_files then
+			table.insert(cmd, "--no-ignore-vcs")
+			table.insert(cmd, "--hidden")
+		end
+		local result = vim.system(cmd, { text = true }):wait()
 		state.files = vim.split(result.stdout or "", "\n", { trimempty = true })
 		table.sort(state.files)
 	end
@@ -567,6 +573,10 @@ local function update_results(list_output, pattern, origin_buf)
 	vim.bo[results.buf].modifiable = false
 end
 
+local function is_open()
+	return prompt.win ~= 0 and vim.api.nvim_win_is_valid(prompt.win)
+end
+
 local function close_ui()
 	for _, part in ipairs({ prompt, results, preview }) do
 		if vim.api.nvim_win_is_valid(part.win) then
@@ -926,6 +936,9 @@ end
 ---@param start_insert boolean
 ---@param resume boolean
 local function show(list_output, start_insert, resume)
+	if is_open() then
+		return
+	end
 	local resume_line = results.last_line
 	state.list_output = list_output
 	state.start_insert = start_insert
@@ -1094,6 +1107,9 @@ end
 
 ---@param method string
 local function show_lsp_locations(method)
+	if is_open() then
+		return
+	end
 	state.lsp_locations = request_lsp_locations(method)
 	if #state.lsp_locations == 0 then
 		vim.notify("No locations found")
@@ -1115,6 +1131,24 @@ function M.setup()
 	for name, hl in pairs(HIGHLIGHTS) do
 		vim.api.nvim_set_hl(0, name, hl)
 	end
+
+	vim.api.nvim_create_user_command("FuzzyMagik", function(opts)
+		local picker, option, value = unpack(opts.fargs)
+		if picker == "find_files" and option == "show_all" and (value == "on" or value == "off") then
+			state.show_all_files = value == "on"
+		else
+			vim.notify("Usage: :FuzzyMagik find_files show_all on|off", vim.log.levels.ERROR)
+		end
+	end, {
+		nargs = "+",
+		complete = function(arg_lead, cmd_line)
+			local args = vim.split(cmd_line, "%s+")
+			local options = ({ { "find_files" }, { "show_all" }, { "on", "off" } })[#args - 1] or {}
+			return vim.tbl_filter(function(option)
+				return vim.startswith(option, arg_lead)
+			end, options)
+		end,
+	})
 end
 
 function M.find_files()
@@ -1142,11 +1176,17 @@ function M.diagnostics()
 end
 
 function M.file_browser()
+	if is_open() then
+		return
+	end
 	state.browser_dir = vim.fn.getcwd()
 	show(create_file_browser_output, false, false)
 end
 
 function M.reveal()
+	if is_open() then
+		return
+	end
 	local file = vim.fn.expand("%:p")
 	local dir = vim.fs.dirname(file)
 	while vim.startswith(dir, vim.fn.getcwd() .. "/") do

@@ -42,6 +42,10 @@ vim.keymap.set("n", "gr", function()
 end)
 ```
 
+## Commands
+
+- `:FuzzyMagik find_files show_all on|off` toggles showing `.gitignore`d and hidden files in find files.
+
 ## Requirements
 
 - Neovim >= 0.10.0
