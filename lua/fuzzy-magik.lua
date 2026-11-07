@@ -17,6 +17,7 @@ local HIGHLIGHTS = {
 	FuzzyMagikGitStaged = { fg = "#b8bb26" },
 	FuzzyMagikGitUnstaged = { fg = "#e77969" },
 	FuzzyMagikGitUntracked = { fg = "#767676" },
+	FuzzyMagikMarked = { fg = "#ff64b5" },
 }
 
 local PROMPT = "> "
@@ -50,6 +51,13 @@ local state = {
 	start_insert = nil,
 	files = nil,
 	lsp_locations = nil,
+	browser_dir = nil,
+	expanded = {},
+	marked = {},
+	clipboard = {
+		action = nil,
+		paths = {},
+	},
 }
 local highlights = {}
 
@@ -443,6 +451,78 @@ local function create_lsp_locations_output(pattern)
 	return items
 end
 
+---@param dir string
+---@param depth integer
+---@param entries table[]
+local function collect_tree_entries(dir, depth, entries)
+	local children = {}
+	for name in vim.fs.dir(dir) do
+		local path = vim.fs.joinpath(dir, name)
+		table.insert(children, { name = name, path = path, is_dir = vim.fn.isdirectory(path) == 1, depth = depth })
+	end
+	table.sort(children, function(a, b)
+		if a.is_dir ~= b.is_dir then
+			return a.is_dir
+		end
+		return a.name < b.name
+	end)
+
+	for _, child in ipairs(children) do
+		table.insert(entries, child)
+		if child.is_dir and state.expanded[child.path] then
+			collect_tree_entries(child.path, depth + 1, entries)
+		end
+	end
+end
+
+---@param pattern string
+local function create_file_browser_output(pattern)
+	local entries = {}
+	collect_tree_entries(state.browser_dir, 0, entries)
+
+	local items = {}
+	for _, entry in ipairs(entries) do
+		local name = entry.is_dir and entry.name .. "/" or entry.name
+		local cols = fuzzy_match_cols(name, pattern)
+		if cols then
+			local line = #items
+			local mark = state.marked[entry.path] and "+ " or "  "
+			local icon = "  "
+			if entry.is_dir then
+				icon = state.expanded[entry.path] and "▾ " or "▸ "
+			end
+			local prefix = mark .. string.rep("  ", entry.depth) .. icon
+			table.insert(highlights, {
+				line = line,
+				col_start = 0,
+				col_end = 1,
+				hl_group = "FuzzyMagikMarked",
+			})
+			if entry.is_dir then
+				table.insert(highlights, {
+					line = line,
+					col_start = #prefix - #icon,
+					col_end = #prefix + #name,
+					hl_group = "FuzzyMagikPath",
+				})
+			else
+				add_path_highlights(line, #prefix, name)
+			end
+			add_match_highlights(line, #prefix, cols)
+			table.insert(items, {
+				line = prefix .. name,
+				path = entry.path,
+				is_dir = entry.is_dir,
+			})
+		end
+	end
+
+	if #items == 0 then
+		return message("No entries matching pattern: " .. pattern)
+	end
+	return items
+end
+
 ---@param list_output fun(pattern: string, origin_buf: integer): table[]
 ---@param pattern string
 ---@param origin_buf integer
@@ -544,6 +624,16 @@ end
 
 ---@param item table
 local function update_preview(item)
+	if item.is_dir then
+		local lines = {}
+		for name, entry_type in vim.fs.dir(item.path) do
+			table.insert(lines, entry_type == "directory" and name .. "/" or name)
+		end
+		table.sort(lines)
+		show_preview(item, lines, nil)
+		return
+	end
+
 	if item.bufnr then
 		show_preview(item, vim.api.nvim_buf_get_lines(item.bufnr, 0, -1, false), vim.bo[item.bufnr].filetype)
 		return
@@ -587,6 +677,218 @@ local function update_preview(item)
 			end)
 		end)
 	end)
+end
+
+local function current_item()
+	return results.items[vim.api.nvim_win_get_cursor(results.win)[1]]
+end
+
+local function target_dir()
+	local item = current_item()
+	if item.path == "" then
+		return state.browser_dir
+	end
+	if item.is_dir then
+		return item.path
+	end
+	return vim.fs.dirname(item.path)
+end
+
+local function selected_paths()
+	local paths = vim.tbl_keys(state.marked)
+	if #paths > 0 then
+		table.sort(paths)
+		return paths
+	end
+
+	local item = current_item()
+	if item.path == "" then
+		return {}
+	end
+	return { item.path }
+end
+
+---@param path string
+local function buffers_under(path)
+	local bufs = {}
+	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+		local name = vim.api.nvim_buf_get_name(buf)
+		if name == path or vim.startswith(name, path .. "/") then
+			table.insert(bufs, buf)
+		end
+	end
+	return bufs
+end
+
+---@param src string
+---@param dst string
+local function copy_path(src, dst)
+	if vim.fn.isdirectory(src) == 0 then
+		local ok, err = vim.uv.fs_copyfile(src, dst)
+		if not ok then
+			vim.notify(err, vim.log.levels.ERROR)
+		end
+		return
+	end
+
+	vim.fn.mkdir(dst, "p")
+	for name in vim.fs.dir(src) do
+		copy_path(vim.fs.joinpath(src, name), vim.fs.joinpath(dst, name))
+	end
+end
+
+---@param old string
+---@param new string
+local function move_path(old, new)
+	local ok, err, err_name = vim.uv.fs_rename(old, new)
+	if not ok then
+		if err_name ~= "EXDEV" then
+			vim.notify(err, vim.log.levels.ERROR)
+			return
+		end
+		copy_path(old, new)
+		vim.fn.delete(old, "rf")
+	end
+
+	for _, buf in ipairs(buffers_under(old)) do
+		vim.api.nvim_buf_set_name(buf, new .. vim.api.nvim_buf_get_name(buf):sub(#old + 1))
+		if vim.api.nvim_buf_is_loaded(buf) and not vim.bo[buf].modified then
+			vim.api.nvim_buf_call(buf, function()
+				vim.cmd("silent! write!")
+			end)
+		end
+	end
+end
+
+local function set_browser_title()
+	vim.api.nvim_win_set_config(results.win, {
+		title = " " .. vim.fn.fnamemodify(state.browser_dir, ":~") .. " ",
+		title_pos = "center",
+	})
+end
+
+local function refresh_browser()
+	set_browser_title()
+	update_results(create_file_browser_output, prompt.text, state.origin_buf)
+	local line = vim.api.nvim_win_get_cursor(results.win)[1]
+	results.last_line = line
+	update_preview(results.items[line])
+end
+
+---@param dir string
+local function open_browser_dir(dir)
+	state.browser_dir = dir
+	prompt.text = ""
+	vim.api.nvim_buf_set_lines(prompt.buf, 0, -1, false, { PROMPT })
+	vim.api.nvim_win_set_cursor(results.win, { 1, 0 })
+	refresh_browser()
+end
+
+local function toggle_mark()
+	local item = current_item()
+	if item.path == "" then
+		return
+	end
+
+	state.marked[item.path] = not state.marked[item.path] or nil
+	refresh_browser()
+end
+
+---@param action string
+local function set_clipboard(action)
+	local paths = selected_paths()
+	if #paths == 0 then
+		return
+	end
+
+	state.clipboard = { action = action, paths = paths }
+	state.marked = {}
+	refresh_browser()
+	vim.notify(action:sub(1, 1):upper() .. action:sub(2) .. ": " .. #paths .. " item(s)")
+end
+
+local function paste_clipboard()
+	local dir = target_dir()
+	state.expanded[dir] = true
+	for _, path in ipairs(state.clipboard.paths) do
+		local target = vim.fs.joinpath(dir, vim.fs.basename(path))
+		if vim.uv.fs_stat(target) then
+			vim.notify("Already exists: " .. target, vim.log.levels.WARN)
+		elseif vim.startswith(dir .. "/", path .. "/") then
+			vim.notify("Cannot paste into itself: " .. path, vim.log.levels.WARN)
+		elseif state.clipboard.action == "cut" then
+			move_path(path, target)
+		else
+			copy_path(path, target)
+		end
+	end
+	if state.clipboard.action == "cut" then
+		state.clipboard = { action = nil, paths = {} }
+	end
+	refresh_browser()
+end
+
+local function delete_selected()
+	local paths = selected_paths()
+	if #paths == 0 or vim.fn.confirm("Delete " .. #paths .. " item(s)?", "&Yes\n&No", 2) ~= 1 then
+		return
+	end
+
+	for _, path in ipairs(paths) do
+		vim.fn.delete(path, "rf")
+		for _, buf in ipairs(buffers_under(path)) do
+			if not vim.bo[buf].modified then
+				pcall(vim.api.nvim_buf_delete, buf, { force = true })
+			end
+		end
+	end
+	state.marked = {}
+	refresh_browser()
+end
+
+local function rename_current()
+	local item = current_item()
+	if item.path == "" then
+		return
+	end
+
+	local name = vim.fn.input("Rename: ", vim.fs.basename(item.path))
+	local target = vim.fs.joinpath(vim.fs.dirname(item.path), name)
+	if name == "" or target == item.path then
+		return
+	end
+
+	if vim.uv.fs_stat(target) then
+		vim.notify("Already exists: " .. target, vim.log.levels.WARN)
+		return
+	end
+
+	vim.fn.mkdir(vim.fs.dirname(target), "p")
+	move_path(item.path, target)
+	refresh_browser()
+end
+
+local function create_path()
+	local name = vim.fn.input("Create: ")
+	if name == "" then
+		return
+	end
+
+	local dir = target_dir()
+	local path = vim.fs.joinpath(dir, name)
+	if vim.uv.fs_stat(path) then
+		vim.notify("Already exists: " .. path, vim.log.levels.WARN)
+		return
+	end
+
+	state.expanded[dir] = true
+	if vim.endswith(name, "/") then
+		vim.fn.mkdir(path, "p")
+	else
+		vim.fn.mkdir(vim.fs.dirname(path), "p")
+		vim.fn.writefile({}, path)
+	end
+	refresh_browser()
 end
 
 ---@param buf_options table
@@ -686,6 +988,11 @@ local function show(list_output, start_insert, resume)
 	vim.keymap.set("n", "<CR>", function()
 		local line_num = vim.api.nvim_win_get_cursor(0)[1]
 		local item = results.items[line_num]
+		if item.is_dir then
+			state.expanded[item.path] = not state.expanded[item.path] or nil
+			refresh_browser()
+			return
+		end
 		close_ui()
 		if item.bufnr then
 			vim.cmd.buffer(item.bufnr)
@@ -696,6 +1003,26 @@ local function show(list_output, start_insert, resume)
 			pcall(vim.api.nvim_win_set_cursor, 0, { item.lnum, (item.col or 1) - 1 })
 		end
 	end, { buffer = results.buf })
+
+	if list_output == create_file_browser_output then
+		set_browser_title()
+		vim.keymap.set("n", "-", function()
+			state.expanded[state.browser_dir] = true
+			open_browser_dir(vim.fs.dirname(state.browser_dir))
+		end, { buffer = results.buf })
+		vim.keymap.set("n", "o", "<CR>", { buffer = results.buf, remap = true })
+		vim.keymap.set("n", "<Tab>", toggle_mark, { buffer = results.buf })
+		vim.keymap.set("n", "x", function()
+			set_clipboard("cut")
+		end, { buffer = results.buf })
+		vim.keymap.set("n", "y", function()
+			set_clipboard("copy")
+		end, { buffer = results.buf })
+		vim.keymap.set("n", "p", paste_clipboard, { buffer = results.buf })
+		vim.keymap.set("n", "d", delete_selected, { buffer = results.buf })
+		vim.keymap.set("n", "r", rename_current, { buffer = results.buf })
+		vim.keymap.set("n", "a", create_path, { buffer = results.buf })
+	end
 
 	for _, part in ipairs({ prompt, results, preview }) do
 		vim.api.nvim_create_autocmd("WinClosed", {
@@ -790,6 +1117,27 @@ end
 
 function M.diagnostics()
 	show(create_diagnostics_output, false, false)
+end
+
+function M.file_browser()
+	state.browser_dir = vim.fn.getcwd()
+	show(create_file_browser_output, false, false)
+end
+
+function M.reveal()
+	local file = vim.fn.expand("%:p")
+	local dir = vim.fs.dirname(file)
+	while vim.startswith(dir, vim.fn.getcwd() .. "/") do
+		state.expanded[dir] = true
+		dir = vim.fs.dirname(dir)
+	end
+	M.file_browser()
+	for line, item in ipairs(results.items) do
+		if item.path == file then
+			vim.api.nvim_win_set_cursor(results.win, { line, 0 })
+			break
+		end
+	end
 end
 
 function M.lsp_definitions()
