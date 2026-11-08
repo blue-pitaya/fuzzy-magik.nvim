@@ -5,8 +5,6 @@ local NAMESPACE = vim.api.nvim_create_namespace("tree_highlights")
 ---@class ResultsWindow
 ---@field win integer
 ---@field buf integer
----@field items FuzzyMagikItem[]
----@field last_line integer
 local ResultsWindow = {}
 ResultsWindow.__index = ResultsWindow
 
@@ -15,8 +13,6 @@ function ResultsWindow.new()
 	return setmetatable({
 		win = 0,
 		buf = 0,
-		items = {},
-		last_line = -1,
 	}, ResultsWindow)
 end
 

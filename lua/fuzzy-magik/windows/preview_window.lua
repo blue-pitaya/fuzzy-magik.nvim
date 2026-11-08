@@ -1,6 +1,7 @@
 local utils = require("fuzzy-magik.utils")
 
-local MAX_LINES = 500
+local MIN_LINES = 500
+local LINES_AFTER_MATCH = 100
 
 ---@class PreviewWindow
 ---@field win integer
@@ -52,9 +53,19 @@ end
 
 ---@param path string
 ---@param lines string[]
-function PreviewWindow:show_file(path, lines)
-	if #lines > MAX_LINES then
-		lines = vim.list_slice(lines, 1, MAX_LINES)
+---@param lnum integer?
+function PreviewWindow:show_file(path, lines, lnum)
+	self:show_lines(path, lines, vim.filetype.match({ filename = path }), lnum)
+end
+
+---@param path string
+---@param lines string[]
+---@param ft string?
+---@param lnum integer?
+function PreviewWindow:show_lines(path, lines, ft, lnum)
+	local limit = math.max(MIN_LINES, (lnum or 0) + LINES_AFTER_MATCH)
+	if #lines > limit then
+		lines = vim.list_slice(lines, 1, limit)
 		table.insert(lines, "")
 		table.insert(lines, "... (truncated)")
 	end
@@ -63,14 +74,18 @@ function PreviewWindow:show_file(path, lines)
 		return
 	end
 
-	local ft = vim.filetype.match({ filename = path })
 	local lang = ft and ft ~= "" and vim.treesitter.language.get_lang(ft)
 	if lang then
 		pcall(vim.treesitter.start, self.buf, lang)
 	end
 
-	vim.wo[self.win].cursorline = false
-	vim.api.nvim_win_set_cursor(self.win, { 1, 0 })
+	vim.wo[self.win].cursorline = lnum ~= nil
+	vim.api.nvim_win_set_cursor(self.win, { math.max(1, math.min(lnum or 1, #lines)), 0 })
+	if lnum then
+		vim.api.nvim_win_call(self.win, function()
+			vim.cmd("normal! zz")
+		end)
+	end
 	vim.api.nvim_win_set_config(self.win, {
 		title = " " .. vim.fn.fnamemodify(path, ":t") .. " ",
 		title_pos = "center",
