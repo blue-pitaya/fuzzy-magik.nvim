@@ -1,0 +1,3 @@
+- find_files should prioritize full match first (like "user.php" should first show "/.../user.php" and later things like "/user/.../index.php")
+- selecting buffer should load it to current normal buffer and not first one
+- on "enter" in find_files should open first highlighed entry, "esc" should work normally

@@ -1,9 +1,11 @@
+local utils = require("fuzzy-magik.utils")
+local app_state = require("fuzzy-magik.app_state")
+local WindowsService = require("fuzzy-magik.windows.windows_service")
+local find_files = require("fuzzy-magik.pickers.find_files").new()
+
 local M = {}
 
-local WINHIGHLIGHT = {
-	default = "Normal:FuzzyMagikNormal,NormalFloat:FuzzyMagikNormal,FloatBorder:FuzzyMagikBorder",
-	active = "Normal:FuzzyMagikNormal,NormalFloat:FuzzyMagikNormal,FloatBorder:FuzzyMagikBorderActive",
-}
+local WINHIGHLIGHT = utils.WINHIGHLIGHT
 
 local HIGHLIGHTS = {
 	FuzzyMagikNormal = { link = "Normal" },
@@ -20,11 +22,7 @@ local HIGHLIGHTS = {
 	FuzzyMagikMarked = { fg = "#ff64b5" },
 }
 
-local PROMPT = "> "
-local WIDTH_RATIO = 0.9
-local RESULTS_WIDTH_RATIO = 0.4
-local HEIGHT_MARGIN = 9
-local START_ROW = 4
+local PROMPT = utils.PROMPT
 local PREVIEW_MIN_LINES = 500
 local PREVIEW_LINES_AFTER_MATCH = 100
 local LSP_TIMEOUT_MS = 1000
@@ -39,135 +37,16 @@ local NAMESPACE = vim.api.nvim_create_namespace("tree_highlights")
 ---@field bufnr? integer
 ---@field is_dir? boolean
 
-local prompt = {
-	win = 0,
-	buf = 0,
-	text = "",
-}
-local results = {
-	win = 0,
-	buf = 0,
-	---@type FuzzyMagikItem[]
-	items = {},
-	last_line = -1,
-}
-local preview = {
-	win = 0,
-	buf = 0,
-}
-local state = {
-	origin_buf = 0,
-	list_output = nil,
-	start_insert = nil,
-	files = nil,
-	show_all_files = false,
-	lsp_locations = nil,
-	browser_dir = nil,
-	expanded = {},
-	marked = {},
-	clipboard = {
-		action = nil,
-		paths = {},
-	},
-}
-local highlights = {}
-
----@param text string
-local function message(text)
-	return { { line = text, path = "" } }
-end
-
----@param text string
----@param pattern string
-local function fuzzy_match_cols(text, pattern)
-	local cols = {}
-	local search_from = 1
-	local lower_text = text:lower()
-	for char in pattern:lower():gmatch(".") do
-		local col = lower_text:find(char, search_from, true)
-		if not col then
-			return nil
-		end
-		table.insert(cols, col)
-		search_from = col + 1
-	end
-	return cols
-end
-
----@param line integer
----@param offset integer
----@param cols integer[]
-local function add_match_highlights(line, offset, cols)
-	for _, col in ipairs(cols) do
-		table.insert(highlights, {
-			line = line,
-			col_start = offset + col - 1,
-			col_end = offset + col,
-			hl_group = "FuzzyMagikMatch",
-		})
-	end
-end
-
----@param line integer
----@param offset integer
----@param filepath string
-local function add_path_highlights(line, offset, filepath)
-	local name_col = filepath:match("()[^/]*$")
-	if name_col > 1 then
-		table.insert(highlights, {
-			line = line,
-			col_start = offset,
-			col_end = offset + name_col - 1,
-			hl_group = "FuzzyMagikPath",
-		})
-	end
-
-	local ext_col = filepath:match("[^/]()%.[^./]+$")
-	if ext_col then
-		table.insert(highlights, {
-			line = line,
-			col_start = offset + ext_col - 1,
-			col_end = offset + #filepath,
-			hl_group = "FuzzyMagikExtension",
-		})
-	end
-end
-
----@param pattern string
-local function create_find_files_output(pattern)
-	if not state.files then
-		local cmd = { "rg", "--files" }
-		if state.show_all_files then
-			table.insert(cmd, "--no-ignore-vcs")
-			table.insert(cmd, "--hidden")
-		end
-		local result = vim.system(cmd, { text = true }):wait()
-		state.files = vim.split(result.stdout or "", "\n", { trimempty = true })
-		table.sort(state.files)
-	end
-
-	---@type FuzzyMagikItem[]
-	local items = {}
-	for _, filepath in ipairs(state.files) do
-		local cols = fuzzy_match_cols(filepath, pattern)
-		if cols then
-			local line = #items
-			add_path_highlights(line, 0, filepath)
-			add_match_highlights(line, 0, cols)
-			table.insert(items, { line = filepath, path = filepath })
-		end
-	end
-
-	if #items == 0 then
-		return message("No files found matching pattern: " .. pattern)
-	end
-	return items
-end
+local prompt = app_state.prompt
+local results = app_state.results
+local preview = app_state.preview
+local state = app_state.state
+local windows_service = WindowsService.new(prompt, results, preview)
 
 ---@param pattern string
 local function create_grep_output(pattern)
 	if pattern == "" then
-		return message("")
+		return utils.message("")
 	end
 
 	local cmd = {
@@ -184,7 +63,7 @@ local function create_grep_output(pattern)
 	}
 	local result = vim.system(cmd, { text = true }):wait()
 	if result.code ~= 0 then
-		return message("No matches for pattern: " .. pattern)
+		return utils.message("No matches for pattern: " .. pattern)
 	end
 
 	---@type FuzzyMagikItem[]
@@ -194,8 +73,8 @@ local function create_grep_output(pattern)
 		if filepath then
 			local line = #items
 			local location = ":" .. lnum .. ":" .. col .. ":"
-			add_path_highlights(line, 0, filepath)
-			table.insert(highlights, {
+			utils.add_path_highlights(line, 0, filepath)
+			table.insert(utils.highlights, {
 				line = line,
 				col_start = #filepath,
 				col_end = #filepath + #location,
@@ -212,7 +91,7 @@ local function create_grep_output(pattern)
 	end
 
 	if #items == 0 then
-		return message("No matches for pattern: " .. pattern)
+		return utils.message("No matches for pattern: " .. pattern)
 	end
 	return items
 end
@@ -223,11 +102,11 @@ local function create_buffers_output(pattern)
 	local items = {}
 	for _, info in ipairs(vim.fn.getbufinfo({ buflisted = 1 })) do
 		local name = info.name ~= "" and vim.fn.fnamemodify(info.name, ":.") or "[No Name]"
-		local cols = fuzzy_match_cols(name, pattern)
+		local cols = utils.fuzzy_match_cols(name, pattern)
 		if cols then
 			local line = #items
-			add_path_highlights(line, 0, name)
-			add_match_highlights(line, 0, cols)
+			utils.add_path_highlights(line, 0, name)
+			utils.add_match_highlights(line, 0, cols)
 			table.insert(items, {
 				line = name,
 				path = info.name ~= "" and name or "",
@@ -237,7 +116,7 @@ local function create_buffers_output(pattern)
 	end
 
 	if #items == 0 then
-		return message("No buffers matching pattern: " .. pattern)
+		return utils.message("No buffers matching pattern: " .. pattern)
 	end
 	return items
 end
@@ -259,14 +138,14 @@ local function create_workspace_symbols_output(pattern, origin_buf)
 					local filepath = vim.fn.fnamemodify(symbol.filename, ":.")
 					local prefix = symbol.text .. "  "
 					local location = ":" .. symbol.lnum
-					table.insert(highlights, {
+					table.insert(utils.highlights, {
 						line = line,
 						col_start = 0,
 						col_end = symbol.text:find("]", 1, true) or 0,
 						hl_group = "FuzzyMagikKind",
 					})
-					add_path_highlights(line, #prefix, filepath)
-					table.insert(highlights, {
+					utils.add_path_highlights(line, #prefix, filepath)
+					table.insert(utils.highlights, {
 						line = line,
 						col_start = #prefix + #filepath,
 						col_end = #prefix + #filepath + #location,
@@ -285,7 +164,7 @@ local function create_workspace_symbols_output(pattern, origin_buf)
 	end
 
 	if #items == 0 then
-		return message("No symbols matching pattern: " .. pattern)
+		return utils.message("No symbols matching pattern: " .. pattern)
 	end
 	return items
 end
@@ -294,14 +173,14 @@ end
 local function create_git_status_output(pattern)
 	local root = vim.system({ "git", "rev-parse", "--show-toplevel" }, { text = true }):wait()
 	if root.code ~= 0 then
-		return message("Not a git repository")
+		return utils.message("Not a git repository")
 	end
 	local root_dir = vim.trim(root.stdout or "")
 
 	local result = vim.system({ "git", "status", "--porcelain=v1", "-z", "--untracked-files=all" }, { text = true })
 		:wait()
 	if result.code ~= 0 then
-		return message("git status failed")
+		return utils.message("git status failed")
 	end
 
 	local entries = vim.split(result.stdout or "", "\0", { plain = true, trimempty = true })
@@ -317,12 +196,12 @@ local function create_git_status_output(pattern)
 		end
 		i = i + 1
 
-		local cols = fuzzy_match_cols(filepath, pattern)
+		local cols = utils.fuzzy_match_cols(filepath, pattern)
 		if cols then
 			local line = #items
 			local prefix = status .. " "
 			if status == "??" then
-				table.insert(highlights, {
+				table.insert(utils.highlights, {
 					line = line,
 					col_start = 0,
 					col_end = 2,
@@ -330,7 +209,7 @@ local function create_git_status_output(pattern)
 				})
 			else
 				if status:sub(1, 1) ~= " " then
-					table.insert(highlights, {
+					table.insert(utils.highlights, {
 						line = line,
 						col_start = 0,
 						col_end = 1,
@@ -338,7 +217,7 @@ local function create_git_status_output(pattern)
 					})
 				end
 				if status:sub(2, 2) ~= " " then
-					table.insert(highlights, {
+					table.insert(utils.highlights, {
 						line = line,
 						col_start = 1,
 						col_end = 2,
@@ -346,8 +225,8 @@ local function create_git_status_output(pattern)
 					})
 				end
 			end
-			add_path_highlights(line, #prefix, filepath)
-			add_match_highlights(line, #prefix, cols)
+			utils.add_path_highlights(line, #prefix, filepath)
+			utils.add_match_highlights(line, #prefix, cols)
 			table.insert(items, {
 				line = prefix .. filepath,
 				path = filepath,
@@ -356,7 +235,7 @@ local function create_git_status_output(pattern)
 	end
 
 	if #items == 0 then
-		return message("No changed files matching pattern: " .. pattern)
+		return utils.message("No changed files matching pattern: " .. pattern)
 	end
 	return items
 end
@@ -382,24 +261,24 @@ local function create_diagnostics_output(pattern)
 		local location = ":" .. diagnostic.lnum + 1 .. ":" .. diagnostic.col + 1 .. ": "
 		local text = diagnostic.message:gsub("\n", " ")
 		local body = filepath .. location .. text
-		local cols = fuzzy_match_cols(body, pattern)
+		local cols = utils.fuzzy_match_cols(body, pattern)
 		if cols then
 			local line = #items
 			local prefix = severity:sub(1, 1) .. " "
-			table.insert(highlights, {
+			table.insert(utils.highlights, {
 				line = line,
 				col_start = 0,
 				col_end = 1,
 				hl_group = "Diagnostic" .. severity:sub(1, 1) .. severity:sub(2):lower(),
 			})
-			add_path_highlights(line, #prefix, filepath)
-			table.insert(highlights, {
+			utils.add_path_highlights(line, #prefix, filepath)
+			table.insert(utils.highlights, {
 				line = line,
 				col_start = #prefix + #filepath,
 				col_end = #prefix + #filepath + #location,
 				hl_group = "FuzzyMagikLineNr",
 			})
-			add_match_highlights(line, #prefix, cols)
+			utils.add_match_highlights(line, #prefix, cols)
 			table.insert(items, {
 				line = prefix .. body,
 				path = filepath,
@@ -411,7 +290,7 @@ local function create_diagnostics_output(pattern)
 	end
 
 	if #items == 0 then
-		return message("No diagnostics matching pattern: " .. pattern)
+		return utils.message("No diagnostics matching pattern: " .. pattern)
 	end
 	return items
 end
@@ -447,17 +326,17 @@ local function create_lsp_locations_output(pattern)
 	for _, entry in ipairs(state.lsp_locations) do
 		local filepath = vim.fn.fnamemodify(entry.filename, ":.")
 		local location = ":" .. entry.lnum .. ":" .. entry.col
-		local cols = fuzzy_match_cols(filepath, pattern)
+		local cols = utils.fuzzy_match_cols(filepath, pattern)
 		if cols then
 			local line = #items
-			add_path_highlights(line, 0, filepath)
-			table.insert(highlights, {
+			utils.add_path_highlights(line, 0, filepath)
+			table.insert(utils.highlights, {
 				line = line,
 				col_start = #filepath,
 				col_end = #filepath + #location,
 				hl_group = "FuzzyMagikLineNr",
 			})
-			add_match_highlights(line, 0, cols)
+			utils.add_match_highlights(line, 0, cols)
 			table.insert(items, {
 				line = filepath .. location,
 				path = filepath,
@@ -469,7 +348,7 @@ local function create_lsp_locations_output(pattern)
 	end
 
 	if #items == 0 then
-		return message("No locations matching pattern: " .. pattern)
+		return utils.message("No locations matching pattern: " .. pattern)
 	end
 	return items
 end
@@ -507,7 +386,7 @@ local function create_file_browser_output(pattern)
 	local items = {}
 	for _, entry in ipairs(entries) do
 		local name = entry.is_dir and entry.name .. "/" or entry.name
-		local cols = fuzzy_match_cols(name, pattern)
+		local cols = utils.fuzzy_match_cols(name, pattern)
 		if cols then
 			local line = #items
 			local mark = state.marked[entry.path] and "+ " or "  "
@@ -516,23 +395,23 @@ local function create_file_browser_output(pattern)
 				icon = state.expanded[entry.path] and "▾ " or "▸ "
 			end
 			local prefix = mark .. string.rep("  ", entry.depth) .. icon
-			table.insert(highlights, {
+			table.insert(utils.highlights, {
 				line = line,
 				col_start = 0,
 				col_end = 1,
 				hl_group = "FuzzyMagikMarked",
 			})
 			if entry.is_dir then
-				table.insert(highlights, {
+				table.insert(utils.highlights, {
 					line = line,
 					col_start = #prefix - #icon,
 					col_end = #prefix + #name,
 					hl_group = "FuzzyMagikPath",
 				})
 			else
-				add_path_highlights(line, #prefix, name)
+				utils.add_path_highlights(line, #prefix, name)
 			end
-			add_match_highlights(line, #prefix, cols)
+			utils.add_match_highlights(line, #prefix, cols)
 			table.insert(items, {
 				line = prefix .. name,
 				path = entry.path,
@@ -542,7 +421,7 @@ local function create_file_browser_output(pattern)
 	end
 
 	if #items == 0 then
-		return message("No entries matching pattern: " .. pattern)
+		return utils.message("No entries matching pattern: " .. pattern)
 	end
 	return items
 end
@@ -553,7 +432,7 @@ end
 local function update_results(list_output, pattern, origin_buf)
 	vim.bo[results.buf].modifiable = true
 
-	highlights = {}
+	utils.highlights = {}
 	results.items = list_output(pattern, origin_buf)
 	local lines = {}
 	for _, item in ipairs(results.items) do
@@ -563,7 +442,7 @@ local function update_results(list_output, pattern, origin_buf)
 	vim.api.nvim_buf_set_lines(results.buf, 0, -1, false, lines)
 
 	vim.api.nvim_buf_clear_namespace(results.buf, NAMESPACE, 0, -1)
-	for _, hl in ipairs(highlights) do
+	for _, hl in ipairs(utils.highlights) do
 		vim.api.nvim_buf_set_extmark(results.buf, NAMESPACE, hl.line, hl.col_start, {
 			end_col = hl.col_end,
 			hl_group = hl.hl_group,
@@ -919,19 +798,6 @@ local function create_path()
 	refresh_browser()
 end
 
----@param buf_options table
----@param enter boolean
----@param config table
-local function open_float(buf_options, enter, config)
-	local buf = vim.api.nvim_create_buf(false, true)
-	for option, value in pairs(buf_options) do
-		vim.bo[buf][option] = value
-	end
-	config.relative = "editor"
-	config.border = "rounded"
-	return buf, vim.api.nvim_open_win(buf, enter, config)
-end
-
 ---@param list_output fun(pattern: string, origin_buf: integer): table[]
 ---@param start_insert boolean
 ---@param resume boolean
@@ -943,46 +809,10 @@ local function show(list_output, start_insert, resume)
 	state.list_output = list_output
 	state.start_insert = start_insert
 	state.origin_buf = vim.api.nvim_get_current_buf()
-	state.files = nil
+	find_files.files = nil
 	results.last_line = -1
 
-	local width = math.floor(vim.o.columns * WIDTH_RATIO)
-	local start_col = math.floor((vim.o.columns - width) / 2)
-
-	local height = vim.o.lines - HEIGHT_MARGIN
-	local results_width = math.floor(width * RESULTS_WIDTH_RATIO)
-	local preview_width = width - results_width - 1
-
-	prompt.buf, prompt.win = open_float({ buftype = "prompt", bufhidden = "wipe" }, true, {
-		width = width,
-		height = 1,
-		row = 1,
-		col = start_col,
-		style = "minimal",
-	})
-	vim.fn.prompt_setprompt(prompt.buf, PROMPT)
-	vim.wo[prompt.win].winhighlight = WINHIGHLIGHT.active
-
-	results.buf, results.win = open_float({ buftype = "nofile", bufhidden = "wipe", modifiable = false }, false, {
-		width = results_width - 1,
-		height = height,
-		row = START_ROW,
-		col = start_col,
-		style = "minimal",
-	})
-	vim.wo[results.win].cursorline = true
-	vim.wo[results.win].winhighlight = WINHIGHLIGHT.default
-
-	preview.buf, preview.win = open_float({ buftype = "nofile", modifiable = false }, false, {
-		width = preview_width,
-		height = height,
-		col = start_col + results_width + 1,
-		row = START_ROW,
-		title = " Preview ",
-		title_pos = "center",
-	})
-	vim.wo[preview.win].number = false
-	vim.wo[preview.win].winhighlight = WINHIGHLIGHT.default
+	windows_service:open()
 
 	vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
 		buffer = prompt.buf,
@@ -1124,6 +954,7 @@ local function show_lsp_locations(method)
 		return
 	end
 
+	state.last_picker = "lsp_locations"
 	show(create_lsp_locations_output, false, false)
 end
 
@@ -1135,7 +966,7 @@ function M.setup()
 	vim.api.nvim_create_user_command("FuzzyMagik", function(opts)
 		local picker, option, value = unpack(opts.fargs)
 		if picker == "find_files" and option == "show_all" and (value == "on" or value == "off") then
-			state.show_all_files = value == "on"
+			find_files.show_all_files = value == "on"
 		else
 			vim.notify("Usage: :FuzzyMagik find_files show_all on|off", vim.log.levels.ERROR)
 		end
@@ -1152,26 +983,50 @@ function M.setup()
 end
 
 function M.find_files()
-	show(create_find_files_output, true, false)
+	if is_open() then
+		return
+	end
+	state.last_picker = "find_files"
+	find_files:show(is_open(), false, windows_service)
 end
 
 function M.live_grep()
+	if is_open() then
+		return
+	end
+	state.last_picker = "live_grep"
 	show(create_grep_output, true, false)
 end
 
 function M.buffers()
+	if is_open() then
+		return
+	end
+	state.last_picker = "buffers"
 	show(create_buffers_output, false, false)
 end
 
 function M.lsp_dynamic_workspace_symbols()
+	if is_open() then
+		return
+	end
+	state.last_picker = "lsp_dynamic_workspace_symbols"
 	show(create_workspace_symbols_output, true, false)
 end
 
 function M.git_status()
+	if is_open() then
+		return
+	end
+	state.last_picker = "git_status"
 	show(create_git_status_output, false, false)
 end
 
 function M.diagnostics()
+	if is_open() then
+		return
+	end
+	state.last_picker = "diagnostics"
 	show(create_diagnostics_output, false, false)
 end
 
@@ -1179,6 +1034,7 @@ function M.file_browser()
 	if is_open() then
 		return
 	end
+	state.last_picker = "file_browser"
 	state.browser_dir = vim.fn.getcwd()
 	show(create_file_browser_output, false, false)
 end
@@ -1211,6 +1067,10 @@ function M.lsp_references()
 end
 
 function M.resume()
+	if state.last_picker == "find_files" then
+		find_files:resume(is_open(), windows_service)
+		return
+	end
 	if not state.list_output then
 		return
 	end
