@@ -4,6 +4,7 @@ local utils = require("fuzzy-magik.utils")
 ---@field prompt PromptWindow
 ---@field results ResultsWindow
 ---@field preview PreviewWindow
+---@field origin_win integer
 local WindowsService = {}
 WindowsService.__index = WindowsService
 
@@ -16,20 +17,27 @@ function WindowsService.new(prompt, results, preview)
 		prompt = prompt,
 		results = results,
 		preview = preview,
+		origin_win = 0,
 	}, WindowsService)
 end
 
 function WindowsService:open()
+	self.origin_win = vim.api.nvim_get_current_win()
 	self.prompt:show()
 	self.results:show()
 	self.preview:show()
 end
 
 function WindowsService:close()
+	local current = vim.api.nvim_get_current_win()
+	local was_focused = current == self.prompt.win or current == self.results.win or current == self.preview.win
 	for _, window in ipairs({ self.prompt, self.results, self.preview }) do
 		if vim.api.nvim_win_is_valid(window.win) then
 			vim.api.nvim_win_close(window.win, true)
 		end
+	end
+	if was_focused and vim.api.nvim_win_is_valid(self.origin_win) then
+		vim.api.nvim_set_current_win(self.origin_win)
 	end
 end
 

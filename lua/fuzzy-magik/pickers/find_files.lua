@@ -36,16 +36,54 @@ function FindFiles:create_output(pattern)
 		table.sort(self.files)
 	end
 
-	---@type FuzzyMagikItem[]
-	local items = {}
+	local lower_pattern = pattern:lower()
+	local matches = {}
 	for _, filepath in ipairs(self.files) do
 		local cols = utils.fuzzy_match_cols(filepath, pattern)
 		if cols then
-			local line = #items
-			utils.add_path_highlights(line, 0, filepath)
-			utils.add_match_highlights(line, 0, cols)
-			table.insert(items, { line = filepath, path = filepath })
+			local lower_path = filepath:lower()
+			local name_col = lower_path:match("()[^/]*$")
+			local name = lower_path:sub(name_col)
+			local rank = 3
+			local start = nil
+			if name == lower_pattern then
+				rank = 0
+				start = name_col
+			else
+				local name_start = name:find(lower_pattern, 1, true)
+				if name_start then
+					rank = 1
+					start = name_col + name_start - 1
+				else
+					start = lower_path:find(lower_pattern, 1, true)
+					if start then
+						rank = 2
+					end
+				end
+			end
+			if start and pattern ~= "" then
+				cols = {}
+				for col = start, start + #pattern - 1 do
+					table.insert(cols, col)
+				end
+			end
+			table.insert(matches, { filepath = filepath, cols = cols, rank = rank })
 		end
+	end
+	table.sort(matches, function(a, b)
+		if a.rank ~= b.rank then
+			return a.rank < b.rank
+		end
+		return a.filepath < b.filepath
+	end)
+
+	---@type FuzzyMagikItem[]
+	local items = {}
+	for _, match in ipairs(matches) do
+		local line = #items
+		utils.add_path_highlights(line, 0, match.filepath)
+		utils.add_match_highlights(line, 0, match.cols)
+		table.insert(items, { line = match.filepath, path = match.filepath })
 	end
 
 	if #items == 0 then
@@ -70,9 +108,9 @@ function FindFiles:show(is_open, do_resume, windows_service)
 	self.windows_service = windows_service
 	windows_service:open()
 	self:set_autocmds()
-	self:set_keymaps()
 	windows_service:set_autocmds()
 	windows_service:set_keymaps()
+	self:set_keymaps()
 
 	if not do_resume then
 		vim.cmd.startinsert()
@@ -135,16 +173,24 @@ function FindFiles:set_keymaps()
 	end
 
 	vim.keymap.set({ "n", "i" }, "<C-q>", send_to_quickfix, { buffer = prompt.buf })
+	vim.keymap.set({ "n", "i" }, "<CR>", function()
+		vim.cmd.stopinsert()
+		self:open_item(self.items[vim.api.nvim_win_get_cursor(results.win)[1]])
+	end, { buffer = prompt.buf })
 
 	vim.keymap.set("n", "<C-q>", send_to_quickfix, { buffer = results.buf })
 	vim.keymap.set("n", "<CR>", function()
-		local item = self.items[vim.api.nvim_win_get_cursor(0)[1]]
-		if not item or item.path == "" then
-			return
-		end
-		self.windows_service:close()
-		vim.cmd.edit(item.path)
+		self:open_item(self.items[vim.api.nvim_win_get_cursor(0)[1]])
 	end, { buffer = results.buf })
+end
+
+---@param item FuzzyMagikItem?
+function FindFiles:open_item(item)
+	if not item or item.path == "" then
+		return
+	end
+	self.windows_service:close()
+	vim.cmd.edit(item.path)
 end
 
 ---@param pattern string
