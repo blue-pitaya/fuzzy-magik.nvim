@@ -109,6 +109,17 @@ function LiveGrep:resume(is_open, windows_service)
 	self:show(is_open, true, windows_service)
 end
 
+---@param is_open boolean
+---@param text string
+---@param windows_service WindowsService
+function LiveGrep:grep_text(is_open, text, windows_service)
+	self:show(is_open, false, windows_service)
+	windows_service.prompt.text = text
+	windows_service.prompt:write_text()
+	self:update_results(text)
+	vim.cmd.startinsert({ bang = true })
+end
+
 function LiveGrep:set_autocmds()
 	local prompt = self.windows_service.prompt
 	local results = self.windows_service.results

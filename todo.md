@@ -1,0 +1,1 @@
+- fix: <c-n> is hardcoded for toggling file browser

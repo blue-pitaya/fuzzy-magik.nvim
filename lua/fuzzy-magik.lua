@@ -96,6 +96,16 @@ function M.live_grep()
 	live_grep:show(is_open(), false, windows_service)
 end
 
+function M.live_grep_selection()
+	if is_open() then
+		return
+	end
+	local lines = vim.fn.getregion(vim.fn.getpos("v"), vim.fn.getpos("."), { type = vim.fn.mode() })
+	vim.cmd.normal({ args = { "\27" }, bang = true })
+	state.last_picker = "live_grep"
+	live_grep:grep_text(is_open(), lines[1] or "", windows_service)
+end
+
 function M.buffers()
 	if is_open() then
 		return
@@ -133,7 +143,7 @@ function M.file_browser()
 		return
 	end
 	state.last_picker = "file_browser"
-	file_browser:open_cwd(is_open(), windows_service)
+	file_browser:open(is_open(), windows_service)
 end
 
 function M.reveal()

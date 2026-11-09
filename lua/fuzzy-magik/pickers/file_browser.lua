@@ -3,6 +3,7 @@ local utils = require("fuzzy-magik.utils")
 ---@class FileBrowser
 ---@field items FuzzyMagikItem[]
 ---@field last_line integer
+---@field prompt_text string
 ---@field browser_dir string?
 ---@field expanded table<string, boolean>
 ---@field marked table<string, boolean>
@@ -16,6 +17,7 @@ function FileBrowser.new()
 	return setmetatable({
 		items = {},
 		last_line = -1,
+		prompt_text = "",
 		browser_dir = nil,
 		expanded = {},
 		marked = {},
@@ -175,6 +177,7 @@ function FileBrowser:show(is_open, do_resume, windows_service)
 	local results = windows_service.results
 	local line = 1
 	if do_resume then
+		prompt.text = self.prompt_text
 		prompt:write_text()
 		self:update_results(prompt.text)
 		line = math.max(1, math.min(resume_line, #self.items))
@@ -191,6 +194,16 @@ end
 ---@param is_open boolean
 ---@param windows_service WindowsService
 function FileBrowser:resume(is_open, windows_service)
+	self:show(is_open, true, windows_service)
+end
+
+---@param is_open boolean
+---@param windows_service WindowsService
+function FileBrowser:open(is_open, windows_service)
+	if not self.browser_dir then
+		self:open_cwd(is_open, windows_service)
+		return
+	end
 	self:show(is_open, true, windows_service)
 end
 
@@ -253,6 +266,14 @@ function FileBrowser:set_autocmds()
 		buffer = results.buf,
 		callback = on_results_cursor,
 	})
+
+	vim.api.nvim_create_autocmd("WinClosed", {
+		pattern = tostring(results.win),
+		callback = function()
+			self.last_line = vim.api.nvim_win_get_cursor(results.win)[1]
+		end,
+		once = true,
+	})
 end
 
 function FileBrowser:set_keymaps()
@@ -263,9 +284,16 @@ function FileBrowser:set_keymaps()
 		self:send_to_quickfix()
 	end
 
+	local function close()
+		self.windows_service:close()
+		vim.cmd.stopinsert()
+	end
+
 	vim.keymap.set({ "n", "i" }, "<C-q>", send_to_quickfix, { buffer = prompt.buf })
+	vim.keymap.set({ "n", "i" }, "<C-n>", close, { buffer = prompt.buf })
 
 	vim.keymap.set("n", "<C-q>", send_to_quickfix, { buffer = results.buf })
+	vim.keymap.set("n", "<C-n>", close, { buffer = results.buf })
 	vim.keymap.set("n", "<CR>", function()
 		local item = self.items[vim.api.nvim_win_get_cursor(0)[1]]
 		if not item or item.path == "" then
@@ -311,6 +339,7 @@ end
 ---@param pattern string
 function FileBrowser:update_results(pattern)
 	utils.highlights = {}
+	self.prompt_text = pattern
 	self.items = self:create_output(pattern)
 	self.last_line = -1
 	self.windows_service.results:render(self.items, utils.highlights)
