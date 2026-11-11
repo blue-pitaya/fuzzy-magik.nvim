@@ -1,6 +1,6 @@
 local utils = require("fuzzy-magik.utils")
 
----@class FindFiles
+---@class FindFiles : Picker
 ---@field files string[]?
 ---@field show_all_files boolean
 ---@field win integer
@@ -92,14 +92,9 @@ function FindFiles:create_output(pattern)
 	return items
 end
 
----@param is_open boolean
 ---@param do_resume boolean
 ---@param windows_service WindowsService
-function FindFiles:show(is_open, do_resume, windows_service)
-	if is_open then
-		return
-	end
-
+function FindFiles:show(do_resume, windows_service)
 	local resume_line = self.last_line
 	self.files = nil
 	self.last_line = -1
@@ -128,10 +123,9 @@ function FindFiles:show(is_open, do_resume, windows_service)
 	self:update_preview(self.items[line])
 end
 
----@param is_open boolean
 ---@param windows_service WindowsService
-function FindFiles:resume(is_open, windows_service)
-	self:show(is_open, true, windows_service)
+function FindFiles:resume(windows_service)
+	self:show(true, windows_service)
 end
 
 function FindFiles:set_autocmds()

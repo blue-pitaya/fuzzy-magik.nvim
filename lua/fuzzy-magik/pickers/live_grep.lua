@@ -1,6 +1,6 @@
 local utils = require("fuzzy-magik.utils")
 
----@class LiveGrep
+---@class LiveGrep : Picker
 ---@field items FuzzyMagikItem[]
 ---@field last_line integer
 ---@field windows_service WindowsService?
@@ -68,14 +68,9 @@ function LiveGrep:create_output(pattern)
 	return items
 end
 
----@param is_open boolean
 ---@param do_resume boolean
 ---@param windows_service WindowsService
-function LiveGrep:show(is_open, do_resume, windows_service)
-	if is_open then
-		return
-	end
-
+function LiveGrep:show(do_resume, windows_service)
 	local resume_line = self.last_line
 	self.last_line = -1
 	self.items = {}
@@ -103,17 +98,15 @@ function LiveGrep:show(is_open, do_resume, windows_service)
 	self:update_preview(self.items[line])
 end
 
----@param is_open boolean
 ---@param windows_service WindowsService
-function LiveGrep:resume(is_open, windows_service)
-	self:show(is_open, true, windows_service)
+function LiveGrep:resume(windows_service)
+	self:show(true, windows_service)
 end
 
----@param is_open boolean
 ---@param text string
 ---@param windows_service WindowsService
-function LiveGrep:grep_text(is_open, text, windows_service)
-	self:show(is_open, false, windows_service)
+function LiveGrep:grep_text(text, windows_service)
+	self:show(false, windows_service)
 	windows_service.prompt.text = text
 	windows_service.prompt:write_text()
 	self:update_results(text)

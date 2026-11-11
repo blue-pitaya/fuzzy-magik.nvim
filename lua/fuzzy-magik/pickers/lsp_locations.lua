@@ -2,7 +2,7 @@ local utils = require("fuzzy-magik.utils")
 
 local LSP_TIMEOUT_MS = 1000
 
----@class LspLocations
+---@class LspLocations : Picker
 ---@field items FuzzyMagikItem[]
 ---@field last_line integer
 ---@field locations table[]
@@ -77,14 +77,10 @@ function LspLocations:request_locations(method)
 	return locations
 end
 
----@param is_open boolean
 ---@param method string
 ---@param windows_service WindowsService
 ---@return boolean
-function LspLocations:show_locations(is_open, method, windows_service)
-	if is_open then
-		return false
-	end
+function LspLocations:show_locations(method, windows_service)
 	self.locations = self:request_locations(method)
 	if #self.locations == 0 then
 		vim.notify("No locations found")
@@ -99,18 +95,13 @@ function LspLocations:show_locations(is_open, method, windows_service)
 		return false
 	end
 
-	self:show(false, false, windows_service)
+	self:show(false, windows_service)
 	return true
 end
 
----@param is_open boolean
 ---@param do_resume boolean
 ---@param windows_service WindowsService
-function LspLocations:show(is_open, do_resume, windows_service)
-	if is_open then
-		return
-	end
-
+function LspLocations:show(do_resume, windows_service)
 	local resume_line = self.last_line
 	self.last_line = -1
 	self.items = {}
@@ -139,10 +130,9 @@ function LspLocations:show(is_open, do_resume, windows_service)
 	self:update_preview(self.items[line])
 end
 
----@param is_open boolean
 ---@param windows_service WindowsService
-function LspLocations:resume(is_open, windows_service)
-	self:show(is_open, true, windows_service)
+function LspLocations:resume(windows_service)
+	self:show(true, windows_service)
 end
 
 function LspLocations:set_autocmds()

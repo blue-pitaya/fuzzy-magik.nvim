@@ -2,7 +2,7 @@ local utils = require("fuzzy-magik.utils")
 
 local LSP_TIMEOUT_MS = 1000
 
----@class WorkspaceSymbols
+---@class WorkspaceSymbols : Picker
 ---@field items FuzzyMagikItem[]
 ---@field last_line integer
 ---@field origin_buf integer
@@ -67,14 +67,9 @@ function WorkspaceSymbols:create_output(pattern)
 	return items
 end
 
----@param is_open boolean
 ---@param do_resume boolean
 ---@param windows_service WindowsService
-function WorkspaceSymbols:show(is_open, do_resume, windows_service)
-	if is_open then
-		return
-	end
-
+function WorkspaceSymbols:show(do_resume, windows_service)
 	local resume_line = self.last_line
 	self.origin_buf = vim.api.nvim_get_current_buf()
 	self.last_line = -1
@@ -103,10 +98,9 @@ function WorkspaceSymbols:show(is_open, do_resume, windows_service)
 	self:update_preview(self.items[line])
 end
 
----@param is_open boolean
 ---@param windows_service WindowsService
-function WorkspaceSymbols:resume(is_open, windows_service)
-	self:show(is_open, true, windows_service)
+function WorkspaceSymbols:resume(windows_service)
+	self:show(true, windows_service)
 end
 
 function WorkspaceSymbols:set_autocmds()

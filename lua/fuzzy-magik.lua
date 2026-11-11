@@ -1,13 +1,4 @@
-local app_state = require("fuzzy-magik.app_state")
-local WindowsService = require("fuzzy-magik.windows.windows_service")
-local find_files = require("fuzzy-magik.pickers.find_files").new()
-local live_grep = require("fuzzy-magik.pickers.live_grep").new()
-local buffers = require("fuzzy-magik.pickers.buffers").new()
-local workspace_symbols = require("fuzzy-magik.pickers.workspace_symbols").new()
-local git_status = require("fuzzy-magik.pickers.git_status").new()
-local diagnostics = require("fuzzy-magik.pickers.diagnostics").new()
-local file_browser = require("fuzzy-magik.pickers.file_browser").new()
-local lsp_locations = require("fuzzy-magik.pickers.lsp_locations").new()
+local AppContext = require("fuzzy-magik.app_context")
 
 local M = {}
 
@@ -35,36 +26,52 @@ local HIGHLIGHTS = {
 ---@field bufnr? integer
 ---@field is_dir? boolean
 
-local prompt = app_state.prompt
-local results = app_state.results
-local preview = app_state.preview
-local state = app_state.state
-local windows_service = WindowsService.new(prompt, results, preview)
+---@class Picker
+---@field show fun(self: Picker, do_resume: boolean, windows_service: WindowsService)
+---@field resume fun(self: Picker, windows_service: WindowsService)
 
-local pickers = {
-	find_files = find_files,
-	live_grep = live_grep,
-	buffers = buffers,
-	lsp_dynamic_workspace_symbols = workspace_symbols,
-	git_status = git_status,
-	diagnostics = diagnostics,
-	file_browser = file_browser,
-	lsp_locations = lsp_locations,
-}
+---@type AppContext?
+local app_context
 
-local function is_open()
-	return prompt.win ~= 0 and vim.api.nvim_win_is_valid(prompt.win)
+---@return AppContext?
+local function get_app_context()
+	if not app_context then
+		vim.notify("FuzzyMagik: call setup() first", vim.log.levels.ERROR)
+	end
+	return app_context
+end
+
+---@param app AppContext
+local function is_open(app)
+	return app.prompt.win ~= 0 and vim.api.nvim_win_is_valid(app.prompt.win)
+end
+
+---@param name string
+---@param open fun(app: AppContext)
+local function open_picker(name, open)
+	local app = get_app_context()
+	if not app or is_open(app) then
+		return
+	end
+	app.state.last_picker = name
+	open(app)
 end
 
 function M.setup()
+	app_context = AppContext.new()
+
 	for name, hl in pairs(HIGHLIGHTS) do
 		vim.api.nvim_set_hl(0, name, hl)
 	end
 
 	vim.api.nvim_create_user_command("FuzzyMagik", function(opts)
+		local app = get_app_context()
+		if not app then
+			return
+		end
 		local picker, option, value = unpack(opts.fargs)
 		if picker == "find_files" and option == "show_all" and (value == "on" or value == "off") then
-			find_files.show_all_files = value == "on"
+			app.find_files.show_all_files = value == "on"
 		else
 			vim.notify("Usage: :FuzzyMagik find_files show_all on|off", vim.log.levels.ERROR)
 		end
@@ -81,95 +88,95 @@ function M.setup()
 end
 
 function M.find_files()
-	if is_open() then
-		return
-	end
-	state.last_picker = "find_files"
-	find_files:show(is_open(), false, windows_service)
+	open_picker("find_files", function(app)
+		app.find_files:show(false, app.windows_service)
+	end)
 end
 
 function M.live_grep()
-	if is_open() then
-		return
-	end
-	state.last_picker = "live_grep"
-	live_grep:show(is_open(), false, windows_service)
+	open_picker("live_grep", function(app)
+		app.live_grep:show(false, app.windows_service)
+	end)
 end
 
 function M.live_grep_selection()
-	if is_open() then
-		return
-	end
-	local lines = vim.fn.getregion(vim.fn.getpos("v"), vim.fn.getpos("."), { type = vim.fn.mode() })
-	vim.cmd.normal({ args = { "\27" }, bang = true })
-	state.last_picker = "live_grep"
-	live_grep:grep_text(is_open(), lines[1] or "", windows_service)
+	open_picker("live_grep", function(app)
+		local lines = vim.fn.getregion(vim.fn.getpos("v"), vim.fn.getpos("."), { type = vim.fn.mode() })
+		vim.cmd.normal({ args = { "\27" }, bang = true })
+		app.live_grep:grep_text(lines[1] or "", app.windows_service)
+	end)
 end
 
 function M.buffers()
-	if is_open() then
-		return
-	end
-	state.last_picker = "buffers"
-	buffers:show(is_open(), false, windows_service)
+	open_picker("buffers", function(app)
+		app.buffers:show(false, app.windows_service)
+	end)
 end
 
 function M.lsp_dynamic_workspace_symbols()
-	if is_open() then
-		return
-	end
-	state.last_picker = "lsp_dynamic_workspace_symbols"
-	workspace_symbols:show(is_open(), false, windows_service)
+	open_picker("lsp_dynamic_workspace_symbols", function(app)
+		app.workspace_symbols:show(false, app.windows_service)
+	end)
 end
 
 function M.git_status()
-	if is_open() then
-		return
-	end
-	state.last_picker = "git_status"
-	git_status:show(is_open(), false, windows_service)
+	open_picker("git_status", function(app)
+		app.git_status:show(false, app.windows_service)
+	end)
 end
 
 function M.diagnostics()
-	if is_open() then
-		return
-	end
-	state.last_picker = "diagnostics"
-	diagnostics:show(is_open(), false, windows_service)
+	open_picker("diagnostics", function(app)
+		app.diagnostics:show(false, app.windows_service)
+	end)
 end
 
 function M.file_browser()
-	if is_open() then
+	local app = get_app_context()
+	if app and is_open(app) and app.state.last_picker == "file_browser" then
+		app.windows_service:close()
+		vim.cmd.stopinsert()
 		return
 	end
-	state.last_picker = "file_browser"
-	file_browser:open(is_open(), windows_service)
+	open_picker("file_browser", function(app)
+		app.file_browser:open(app.windows_service)
+	end)
 end
 
 function M.reveal()
-	if is_open() then
-		return
-	end
-	state.last_picker = "file_browser"
-	file_browser:reveal(is_open(), windows_service)
+	open_picker("file_browser", function(app)
+		app.file_browser:reveal(app.windows_service)
+	end)
 end
 
 function M.lsp_definitions()
-	if lsp_locations:show_locations(is_open(), "textDocument/definition", windows_service) then
-		state.last_picker = "lsp_locations"
+	local app = get_app_context()
+	if not app or is_open(app) then
+		return
+	end
+	if app.lsp_locations:show_locations("textDocument/definition", app.windows_service) then
+		app.state.last_picker = "lsp_locations"
 	end
 end
 
 function M.lsp_references()
-	if lsp_locations:show_locations(is_open(), "textDocument/references", windows_service) then
-		state.last_picker = "lsp_locations"
+	local app = get_app_context()
+	if not app or is_open(app) then
+		return
+	end
+	if app.lsp_locations:show_locations("textDocument/references", app.windows_service) then
+		app.state.last_picker = "lsp_locations"
 	end
 end
 
 function M.resume()
-	local picker = pickers[state.last_picker]
+	local app = get_app_context()
+	if not app or is_open(app) then
+		return
+	end
+	local picker = app.pickers[app.state.last_picker or ""]
 	if picker then
-		picker:resume(is_open(), windows_service)
+		picker:resume(app.windows_service)
 	end
 end
 

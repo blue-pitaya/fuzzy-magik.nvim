@@ -1,6 +1,6 @@
 local utils = require("fuzzy-magik.utils")
 
----@class FileBrowser
+---@class FileBrowser : Picker
 ---@field items FuzzyMagikItem[]
 ---@field last_line integer
 ---@field prompt_text string
@@ -153,14 +153,9 @@ function FileBrowser:create_output(pattern)
 	return items
 end
 
----@param is_open boolean
 ---@param do_resume boolean
 ---@param windows_service WindowsService
-function FileBrowser:show(is_open, do_resume, windows_service)
-	if is_open then
-		return
-	end
-
+function FileBrowser:show(do_resume, windows_service)
 	local resume_line = self.last_line
 	self.last_line = -1
 	self.items = {}
@@ -191,45 +186,35 @@ function FileBrowser:show(is_open, do_resume, windows_service)
 	self:update_preview(self.items[line])
 end
 
----@param is_open boolean
 ---@param windows_service WindowsService
-function FileBrowser:resume(is_open, windows_service)
-	self:show(is_open, true, windows_service)
+function FileBrowser:resume(windows_service)
+	self:show(true, windows_service)
 end
 
----@param is_open boolean
 ---@param windows_service WindowsService
-function FileBrowser:open(is_open, windows_service)
+function FileBrowser:open(windows_service)
 	if not self.browser_dir then
-		self:open_cwd(is_open, windows_service)
+		self:open_cwd(windows_service)
 		return
 	end
-	self:show(is_open, true, windows_service)
+	self:show(true, windows_service)
 end
 
----@param is_open boolean
 ---@param windows_service WindowsService
-function FileBrowser:open_cwd(is_open, windows_service)
-	if is_open then
-		return
-	end
+function FileBrowser:open_cwd(windows_service)
 	self.browser_dir = vim.fn.getcwd()
-	self:show(is_open, false, windows_service)
+	self:show(false, windows_service)
 end
 
----@param is_open boolean
 ---@param windows_service WindowsService
-function FileBrowser:reveal(is_open, windows_service)
-	if is_open then
-		return
-	end
+function FileBrowser:reveal(windows_service)
 	local file = vim.fn.expand("%:p")
 	local dir = vim.fs.dirname(file)
 	while vim.startswith(dir, vim.fn.getcwd() .. "/") do
 		self.expanded[dir] = true
 		dir = vim.fs.dirname(dir)
 	end
-	self:open_cwd(is_open, windows_service)
+	self:open_cwd(windows_service)
 	for line, item in ipairs(self.items) do
 		if item.path == file then
 			vim.api.nvim_win_set_cursor(windows_service.results.win, { line, 0 })
@@ -284,16 +269,9 @@ function FileBrowser:set_keymaps()
 		self:send_to_quickfix()
 	end
 
-	local function close()
-		self.windows_service:close()
-		vim.cmd.stopinsert()
-	end
-
 	vim.keymap.set({ "n", "i" }, "<C-q>", send_to_quickfix, { buffer = prompt.buf })
-	vim.keymap.set({ "n", "i" }, "<C-n>", close, { buffer = prompt.buf })
 
 	vim.keymap.set("n", "<C-q>", send_to_quickfix, { buffer = results.buf })
-	vim.keymap.set("n", "<C-n>", close, { buffer = results.buf })
 	vim.keymap.set("n", "<CR>", function()
 		local item = self.items[vim.api.nvim_win_get_cursor(0)[1]]
 		if not item or item.path == "" then
