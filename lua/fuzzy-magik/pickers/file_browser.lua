@@ -1,11 +1,16 @@
 local utils = require("fuzzy-magik.utils")
 
+---@class FileBrowserItem : FuzzyMagikItem
+---@field expanded? boolean
+---@field children? table<string, FileBrowserItem>
+
 ---@class FileBrowser : Picker
----@field items FuzzyMagikItem[]
+---@field items FileBrowserItem[]
 ---@field last_line integer
 ---@field prompt_text string
 ---@field browser_dir string?
----@field expanded table<string, boolean>
+---@field tree FileBrowserItem? topmost node, kept so state survives going up and back down
+---@field root FileBrowserItem? node for browser_dir
 ---@field marked table<string, boolean>
 ---@field clipboard { action: string?, paths: string[] }
 ---@field windows_service WindowsService?
@@ -19,7 +24,8 @@ function FileBrowser.new()
 		last_line = -1,
 		prompt_text = "",
 		browser_dir = nil,
-		expanded = {},
+		tree = nil,
+		root = nil,
 		marked = {},
 		clipboard = {
 			action = nil,
@@ -80,26 +86,81 @@ local function move_path(old, new)
 	end
 end
 
+---@param path string
+---@param is_dir boolean
+---@return FileBrowserItem
+local function new_node(path, is_dir)
+	return { line = "", path = path, is_dir = is_dir, expanded = false }
+end
+
+---Returns the node for a directory inside the tree, creating missing nodes on the way.
+---@param path string
+---@return FileBrowserItem?
+function FileBrowser:dir_node(path)
+	local node = self.tree
+	if not node then
+		return nil
+	end
+	if path == node.path then
+		return node
+	end
+	local prefix = (node.path:gsub("/$", "")) .. "/"
+	if not vim.startswith(path, prefix) then
+		return nil
+	end
+	for name in vim.gsplit(path:sub(#prefix + 1), "/", { plain = true, trimempty = true }) do
+		node.children = node.children or {}
+		local child = node.children[name]
+		if not child then
+			child = new_node(vim.fs.joinpath(node.path, name), true)
+			node.children[name] = child
+		end
+		node = child
+	end
+	return node
+end
+
 ---@param dir string
+function FileBrowser:set_root(dir)
+	local root = self:dir_node(dir)
+	if not root then
+		root = new_node(dir, true)
+		local top = self.tree
+		if top and vim.fs.dirname(top.path) == dir then
+			root.children = { [vim.fs.basename(top.path)] = top }
+		end
+		self.tree = root
+	end
+	self.root = root
+	self.browser_dir = dir
+end
+
+---@param node FileBrowserItem
 ---@param depth integer
 ---@param entries table[]
-function FileBrowser:collect_tree_entries(dir, depth, entries)
+function FileBrowser:collect_tree_entries(node, depth, entries)
+	local old = node.children or {}
 	local children = {}
-	for name in vim.fs.dir(dir) do
-		local path = vim.fs.joinpath(dir, name)
-		table.insert(children, { name = name, path = path, is_dir = vim.fn.isdirectory(path) == 1, depth = depth })
+	local sorted = {}
+	for name in vim.fs.dir(node.path) do
+		local path = vim.fs.joinpath(node.path, name)
+		local child = old[name] or new_node(path, false)
+		child.is_dir = vim.fn.isdirectory(path) == 1
+		children[name] = child
+		table.insert(sorted, { name = name, node = child, depth = depth })
 	end
-	table.sort(children, function(a, b)
-		if a.is_dir ~= b.is_dir then
-			return a.is_dir
+	node.children = children
+	table.sort(sorted, function(a, b)
+		if a.node.is_dir ~= b.node.is_dir then
+			return a.node.is_dir
 		end
 		return a.name < b.name
 	end)
 
-	for _, child in ipairs(children) do
-		table.insert(entries, child)
-		if child.is_dir and self.expanded[child.path] then
-			self:collect_tree_entries(child.path, depth + 1, entries)
+	for _, entry in ipairs(sorted) do
+		table.insert(entries, entry)
+		if entry.node.is_dir and entry.node.expanded then
+			self:collect_tree_entries(entry.node, depth + 1, entries)
 		end
 	end
 end
@@ -107,19 +168,20 @@ end
 ---@param pattern string
 function FileBrowser:create_output(pattern)
 	local entries = {}
-	self:collect_tree_entries(self.browser_dir, 0, entries)
+	self:collect_tree_entries(self.root, 0, entries)
 
-	---@type FuzzyMagikItem[]
+	---@type FileBrowserItem[]
 	local items = {}
 	for _, entry in ipairs(entries) do
-		local name = entry.is_dir and entry.name .. "/" or entry.name
+		local node = entry.node
+		local name = node.is_dir and entry.name .. "/" or entry.name
 		local cols = utils.fuzzy_match_cols(name, pattern)
 		if cols then
 			local line = #items
-			local mark = self.marked[entry.path] and "+ " or "  "
+			local mark = self.marked[node.path] and "+ " or "  "
 			local icon = "  "
-			if entry.is_dir then
-				icon = self.expanded[entry.path] and "▾ " or "▸ "
+			if node.is_dir then
+				icon = node.expanded and "▾ " or "▸ "
 			end
 			local prefix = mark .. string.rep("  ", entry.depth) .. icon
 			table.insert(utils.highlights, {
@@ -128,7 +190,7 @@ function FileBrowser:create_output(pattern)
 				col_end = 1,
 				hl_group = "FuzzyMagikMarked",
 			})
-			if entry.is_dir then
+			if node.is_dir then
 				table.insert(utils.highlights, {
 					line = line,
 					col_start = #prefix - #icon,
@@ -139,11 +201,8 @@ function FileBrowser:create_output(pattern)
 				utils.add_path_highlights(line, #prefix, name)
 			end
 			utils.add_match_highlights(line, #prefix, cols)
-			table.insert(items, {
-				line = prefix .. name,
-				path = entry.path,
-				is_dir = entry.is_dir,
-			})
+			node.line = prefix .. name
+			table.insert(items, node)
 		end
 	end
 
@@ -193,7 +252,7 @@ end
 
 ---@param windows_service WindowsService
 function FileBrowser:open(windows_service)
-	if not self.browser_dir then
+	if not self.root then
 		self:open_cwd(windows_service)
 		return
 	end
@@ -202,19 +261,20 @@ end
 
 ---@param windows_service WindowsService
 function FileBrowser:open_cwd(windows_service)
-	self.browser_dir = vim.fn.getcwd()
+	self:set_root(vim.fn.getcwd())
 	self:show(false, windows_service)
 end
 
 ---@param windows_service WindowsService
 function FileBrowser:reveal(windows_service)
 	local file = vim.fn.expand("%:p")
+	self:set_root(vim.fn.getcwd())
 	local dir = vim.fs.dirname(file)
 	while vim.startswith(dir, vim.fn.getcwd() .. "/") do
-		self.expanded[dir] = true
+		self:dir_node(dir).expanded = true
 		dir = vim.fs.dirname(dir)
 	end
-	self:open_cwd(windows_service)
+	self:show(false, windows_service)
 	for line, item in ipairs(self.items) do
 		if item.path == file then
 			vim.api.nvim_win_set_cursor(windows_service.results.win, { line, 0 })
@@ -278,7 +338,7 @@ function FileBrowser:set_keymaps()
 			return
 		end
 		if item.is_dir then
-			self.expanded[item.path] = not self.expanded[item.path] or nil
+			item.expanded = not item.expanded
 			self:refresh()
 			return
 		end
@@ -287,7 +347,7 @@ function FileBrowser:set_keymaps()
 	end, { buffer = results.buf })
 
 	vim.keymap.set("n", "-", function()
-		self.expanded[self.browser_dir] = true
+		self.root.expanded = true
 		self:open_dir(vim.fs.dirname(self.browser_dir))
 	end, { buffer = results.buf })
 	vim.keymap.set("n", "o", "<CR>", { buffer = results.buf, remap = true })
@@ -456,7 +516,7 @@ end
 ---@param dir string
 function FileBrowser:open_dir(dir)
 	local prompt = self.windows_service.prompt
-	self.browser_dir = dir
+	self:set_root(dir)
 	prompt.text = ""
 	prompt:write_text()
 	vim.api.nvim_win_set_cursor(self.windows_service.results.win, { 1, 0 })
@@ -488,7 +548,7 @@ end
 
 function FileBrowser:paste_clipboard()
 	local dir = self:target_dir()
-	self.expanded[dir] = true
+	self:dir_node(dir).expanded = true
 	for _, path in ipairs(self.clipboard.paths) do
 		local target = vim.fs.joinpath(dir, vim.fs.basename(path))
 		if vim.uv.fs_stat(target) then
@@ -556,14 +616,15 @@ function FileBrowser:create_path()
 		return
 	end
 
-	local dir = self:target_dir()
+	local item = self:current_item()
+	local dir = item.is_dir and item.expanded and item.path or self:target_dir()
 	local path = vim.fs.joinpath(dir, name)
 	if vim.uv.fs_stat(path) then
 		vim.notify("Already exists: " .. path, vim.log.levels.WARN)
 		return
 	end
 
-	self.expanded[dir] = true
+	self:dir_node(dir).expanded = true
 	if vim.endswith(name, "/") then
 		vim.fn.mkdir(path, "p")
 	else
