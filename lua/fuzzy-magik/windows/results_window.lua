@@ -36,16 +36,20 @@ end
 
 ---@param items FuzzyMagikItem[]
 ---@param highlights table[]
-function ResultsWindow:render(items, highlights)
+---@param start_line integer?
+function ResultsWindow:render(items, highlights, start_line)
+	start_line = start_line or 0
 	local lines = {}
 	for _, item in ipairs(items) do
 		table.insert(lines, item.line)
 	end
 
 	vim.bo[self.buf].modifiable = true
-	vim.api.nvim_buf_set_lines(self.buf, 0, -1, false, lines)
+	vim.api.nvim_buf_set_lines(self.buf, start_line, -1, false, lines)
 
-	vim.api.nvim_buf_clear_namespace(self.buf, NAMESPACE, 0, -1)
+	if start_line == 0 then
+		vim.api.nvim_buf_clear_namespace(self.buf, NAMESPACE, 0, -1)
+	end
 	for _, hl in ipairs(highlights) do
 		vim.api.nvim_buf_set_extmark(self.buf, NAMESPACE, hl.line, hl.col_start, {
 			end_col = hl.col_end,

@@ -4,6 +4,8 @@ local utils = require("fuzzy-magik.utils")
 ---@field items FuzzyMagikItem[]
 ---@field last_line integer
 ---@field windows_service WindowsService?
+---@field job vim.SystemObj?
+---@field request integer
 local LiveGrep = {}
 LiveGrep.__index = LiveGrep
 
@@ -12,38 +14,34 @@ function LiveGrep.new()
 	return setmetatable({
 		items = {},
 		last_line = -1,
+		job = nil,
+		request = 0,
 	}, LiveGrep)
 end
 
----@param pattern string
-function LiveGrep:create_output(pattern)
-	if pattern == "" then
-		return utils.message("")
+function LiveGrep:stop_job()
+	self.request = self.request + 1
+	if self.job and not self.job:is_closing() then
+		self.job:kill(15)
+	end
+	self.job = nil
+end
+
+---@param output string
+function LiveGrep:append_output(output)
+	local results = self.windows_service.results
+	if not vim.api.nvim_buf_is_valid(results.buf) then
+		return
 	end
 
-	local cmd = {
-		"rg",
-		"--with-filename",
-		"--line-number",
-		"--column",
-		"--no-heading",
-		"--color=never",
-		"--smart-case",
-		"--sort=path",
-		"--",
-		pattern,
-	}
-	local result = vim.system(cmd, { text = true }):wait()
-	if result.code ~= 0 then
-		return utils.message("No matches for pattern: " .. pattern)
-	end
-
+	local start_line = #self.items
+	utils.highlights = {}
 	---@type FuzzyMagikItem[]
-	local items = {}
-	for _, output_line in ipairs(vim.split(result.stdout or "", "\n", { trimempty = true })) do
+	local batch = {}
+	for output_line in vim.gsplit(output, "\n", { plain = true }) do
 		local filepath, lnum, col, text = output_line:match("^(.-):(%d+):(%d+):(.*)$")
 		if filepath then
-			local line = #items
+			local line = start_line + #batch
 			local location = ":" .. lnum .. ":" .. col .. ":"
 			utils.add_path_highlights(line, 0, filepath)
 			table.insert(utils.highlights, {
@@ -52,20 +50,29 @@ function LiveGrep:create_output(pattern)
 				col_end = #filepath + #location,
 				hl_group = "FuzzyMagikLineNr",
 			})
-			table.insert(items, {
+			local item = {
 				line = filepath .. location .. text,
 				path = filepath,
 				lnum = tonumber(lnum),
 				col = tonumber(col),
 				text = text,
-			})
+			}
+			table.insert(batch, item)
+			table.insert(self.items, item)
 		end
 	end
 
-	if #items == 0 then
-		return utils.message("No matches for pattern: " .. pattern)
+	if #batch > 0 then
+		results:render(batch, utils.highlights, start_line)
 	end
-	return items
+end
+
+---@param items FuzzyMagikItem[]
+function LiveGrep:show_message_items(items)
+	self.items = items
+	if vim.api.nvim_buf_is_valid(self.windows_service.results.buf) then
+		self.windows_service.results:render(items, {})
+	end
 end
 
 ---@param do_resume boolean
@@ -90,12 +97,16 @@ function LiveGrep:show(do_resume, windows_service)
 	local prompt = windows_service.prompt
 	local results = windows_service.results
 	prompt:write_text()
-	self:update_results(prompt.text)
-	local line = math.max(1, math.min(resume_line, #self.items))
 	vim.api.nvim_set_current_win(results.win)
-	vim.api.nvim_win_set_cursor(results.win, { line, 0 })
-	self.last_line = line
-	self:update_preview(self.items[line])
+	self:update_results(prompt.text, function()
+		if not vim.api.nvim_win_is_valid(results.win) then
+			return
+		end
+		local line = math.max(1, math.min(resume_line, #self.items))
+		vim.api.nvim_win_set_cursor(results.win, { line, 0 })
+		self.last_line = line
+		self:update_preview(self.items[line])
+	end)
 end
 
 ---@param windows_service WindowsService
@@ -141,6 +152,13 @@ function LiveGrep:set_autocmds()
 		buffer = results.buf,
 		callback = on_results_cursor,
 	})
+
+	vim.api.nvim_create_autocmd("BufWipeout", {
+		buffer = results.buf,
+		callback = function()
+			self:stop_job()
+		end,
+	})
 end
 
 function LiveGrep:set_keymaps()
@@ -166,11 +184,73 @@ function LiveGrep:set_keymaps()
 end
 
 ---@param pattern string
-function LiveGrep:update_results(pattern)
-	utils.highlights = {}
-	self.items = self:create_output(pattern)
+---@param on_done fun()?
+function LiveGrep:update_results(pattern, on_done)
+	self:stop_job()
+	local request = self.request
+	self.items = {}
 	self.last_line = -1
-	self.windows_service.results:render(self.items, utils.highlights)
+
+	if pattern == "" then
+		self:show_message_items(utils.message(""))
+		if on_done then
+			on_done()
+		end
+		return
+	end
+
+	local cmd = {
+		"rg",
+		"--with-filename",
+		"--line-number",
+		"--column",
+		"--no-heading",
+		"--color=never",
+		"--smart-case",
+		"--max-columns=500",
+		"--max-columns-preview",
+		"--",
+		pattern,
+	}
+
+	local pending = ""
+	self.job = vim.system(cmd, {
+		text = true,
+		stdout = function(_, data)
+			if not data then
+				return
+			end
+			local chunk = pending .. data
+			local last_newline = chunk:match(".*()\n")
+			if not last_newline then
+				pending = chunk
+				return
+			end
+			pending = chunk:sub(last_newline + 1)
+			local output = chunk:sub(1, last_newline - 1)
+			vim.schedule(function()
+				if request == self.request then
+					self:append_output(output)
+				end
+			end)
+		end,
+	}, function()
+		vim.schedule(function()
+			if request ~= self.request then
+				return
+			end
+			self.job = nil
+			if pending ~= "" then
+				self:append_output(pending)
+			end
+			if #self.items == 0 then
+				self:show_message_items(utils.message("No matches for pattern: " .. pattern))
+			end
+			if on_done then
+				on_done()
+			end
+		end)
+	end)
 end
 
 ---@param item FuzzyMagikItem

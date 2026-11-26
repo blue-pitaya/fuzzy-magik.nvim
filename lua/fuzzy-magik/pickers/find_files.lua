@@ -1,41 +1,86 @@
 local utils = require("fuzzy-magik.utils")
 
 ---@class FindFiles : Picker
----@field files string[]?
+---@field files string[]
 ---@field show_all_files boolean
 ---@field win integer
 ---@field buf integer
 ---@field items FuzzyMagikItem[]
 ---@field last_line integer
 ---@field windows_service WindowsService?
+---@field job vim.SystemObj?
+---@field request integer
+---@field pattern string?
 local FindFiles = {}
 FindFiles.__index = FindFiles
 
 ---@return FindFiles
 function FindFiles.new()
 	return setmetatable({
-		files = nil,
+		files = {},
 		show_all_files = false,
 		win = 0,
 		buf = 0,
 		items = {},
 		last_line = -1,
+		job = nil,
+		request = 0,
+		pattern = nil,
 	}, FindFiles)
+end
+
+function FindFiles:stop_job()
+	self.request = self.request + 1
+	if self.job and not self.job:is_closing() then
+		self.job:kill(15)
+	end
+	self.job = nil
+end
+
+---@param on_done fun()
+function FindFiles:load_files(on_done)
+	self:stop_job()
+	local request = self.request
+	self.files = {}
+
+	local cmd = { "rg", "--files" }
+	if self.show_all_files then
+		table.insert(cmd, "--no-ignore-vcs")
+		table.insert(cmd, "--hidden")
+	end
+
+	local pending = ""
+	self.job = vim.system(cmd, {
+		text = true,
+		stdout = function(_, data)
+			if not data or request ~= self.request then
+				return
+			end
+			local chunk = pending .. data
+			local last_newline = chunk:match(".*()\n")
+			if not last_newline then
+				pending = chunk
+				return
+			end
+			pending = chunk:sub(last_newline + 1)
+			vim.list_extend(self.files, vim.split(chunk:sub(1, last_newline - 1), "\n", { trimempty = true }))
+		end,
+	}, function()
+		vim.schedule(function()
+			if request ~= self.request then
+				return
+			end
+			self.job = nil
+			if pending ~= "" then
+				table.insert(self.files, pending)
+			end
+			on_done()
+		end)
+	end)
 end
 
 ---@param pattern string
 function FindFiles:create_output(pattern)
-	if not self.files then
-		local cmd = { "rg", "--files" }
-		if self.show_all_files then
-			table.insert(cmd, "--no-ignore-vcs")
-			table.insert(cmd, "--hidden")
-		end
-		local result = vim.system(cmd, { text = true }):wait()
-		self.files = vim.split(result.stdout or "", "\n", { trimempty = true })
-		table.sort(self.files)
-	end
-
 	local lower_pattern = pattern:lower()
 	local matches = {}
 	for _, filepath in ipairs(self.files) do
@@ -86,6 +131,9 @@ function FindFiles:create_output(pattern)
 		table.insert(items, { line = match.filepath, path = match.filepath })
 	end
 
+	if #items == 0 and self.job then
+		return utils.message("Loading files...")
+	end
 	if #items == 0 then
 		return utils.message("No files found matching pattern: " .. pattern)
 	end
@@ -96,9 +144,9 @@ end
 ---@param windows_service WindowsService
 function FindFiles:show(do_resume, windows_service)
 	local resume_line = self.last_line
-	self.files = nil
 	self.last_line = -1
 	self.items = {}
+	self.pattern = nil
 
 	self.windows_service = windows_service
 	windows_service:open()
@@ -108,6 +156,11 @@ function FindFiles:show(do_resume, windows_service)
 	self:set_keymaps()
 
 	if not do_resume then
+		self:load_files(function()
+			if self.pattern then
+				self:update_results(self.pattern)
+			end
+		end)
 		vim.cmd.startinsert()
 		return
 	end
@@ -115,12 +168,14 @@ function FindFiles:show(do_resume, windows_service)
 	local prompt = windows_service.prompt
 	local results = windows_service.results
 	prompt:write_text()
-	self:update_results(prompt.text)
-	local line = math.max(1, math.min(resume_line, #self.items))
 	vim.api.nvim_set_current_win(results.win)
-	vim.api.nvim_win_set_cursor(results.win, { line, 0 })
-	self.last_line = line
-	self:update_preview(self.items[line])
+	self:load_files(function()
+		self:update_results(prompt.text)
+		local line = math.max(1, math.min(resume_line, #self.items))
+		vim.api.nvim_win_set_cursor(results.win, { line, 0 })
+		self.last_line = line
+		self:update_preview(self.items[line])
+	end)
 end
 
 ---@param windows_service WindowsService
@@ -156,6 +211,13 @@ function FindFiles:set_autocmds()
 		buffer = results.buf,
 		callback = on_results_cursor,
 	})
+
+	vim.api.nvim_create_autocmd("BufWipeout", {
+		buffer = results.buf,
+		callback = function()
+			self:stop_job()
+		end,
+	})
 end
 
 function FindFiles:set_keymaps()
@@ -189,6 +251,7 @@ end
 
 ---@param pattern string
 function FindFiles:update_results(pattern)
+	self.pattern = pattern
 	utils.highlights = {}
 	self.items = self:create_output(pattern)
 	self.last_line = -1
